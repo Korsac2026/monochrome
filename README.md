@@ -15,22 +15,29 @@ Menu key: **RightShift**. In first person press **M** (game's own key) to free t
 ## Tabs
 
 **ESP**
-- Monster ESP (+ NPC scan fallback for odd monster names)
-- Key ESP (key locations)
-- Code ESP — marks the **NOTE / PAPER where the code IS**. The code is
-  handwritten in the paper texture (not a TextLabel), so it detects
-  note/paper-like objects, "read this" prompts, and world texts showing
-  digits. It never marks the keypad where you type the code.
-- Max distance slider, text size slider
+- Monster ESP (+ NPC scan fallback, monster color)
+- Key ESP (+ key color)
+- Code ESP (+ code color) — marks the **NOTE / PAPER where the code IS**.
+  The code is handwritten in the paper texture (not a TextLabel), so it
+  detects note/paper-like objects, "read this" prompts, world texts with
+  digits and readable code values. It never marks the keypad.
+- Style: chams (outline), 2D corner boxes, snaplines, labels, max distance,
+  text size. Boxes/snaplines need the Drawing API; they auto-disable with a
+  notice when the executor lacks it.
 
 **Movement**
-- Noclip, Fly (WASD + Space up / LeftShift down), Walk speed slider, Fly speed slider
+- Noclip (hotkey **N**), Fly (hotkey **V**, WASD + Space up / LeftShift down),
+  Walk speed slider, Fly speed slider
+- World: Fullbright, TP Spawn
+- Interaction: Instant Interact (all E prompts complete with zero hold)
 
 **Auto**
 - Auto Win (instant teleport): 1 clears the boarded entrance, 2 opens drawers
   (keys hide inside), 3 grabs the 4 keys, 4 opens deadbolts, 5 reads notes,
   flies to the elevator panel and ENTERS the code (click detectors first,
   then real mouse clicks on digit buttons, code shown if manual entry needed).
+- Auto Use Keys: passive loop, spends held keys on nearby exits (no teleport).
+- Put Code Now: one-shot code entry at the panel.
 - Collect distance slider (stand-off range when grabbing).
 - Live status label.
 
@@ -45,7 +52,7 @@ The status bar shows `monster:N  key:N  code:N  code:XXXX  keys:H/4`.
   with no movement anticheat — instant CFrame teleport + noclip is undetected
   here and the fastest option, so Auto Win teleports instantly everywhere
   (small waits only for server replication and prompt holds).
-- **Speed**: the game resets WalkSpeed constantly (sprint/stamina). It is now
+- **Speed**: the game resets WalkSpeed constantly (sprint/stamina). It is
   re-applied every frame plus instantly on change and on respawn.
 - **Auto Win**: opens drawers first (keys spawn inside), pries entrance planks,
   survives respawns, interacts via `fireproximityprompt` with a real E-key
@@ -53,7 +60,9 @@ The status bar shows `monster:N  key:N  code:N  code:XXXX  keys:H/4`.
   pull the code from player UI, and types the code at the panel automatically.
 - **Code ESP**: paper/note objects by name + "read" prompts + world digit
   texts + readable code values. Keypads/panels/locks/safes are excluded from
-  marking (navigation only).
+  marking (navigation only). Our own ESP labels are excluded too (no self-loop).
+- **Unload**: fully removes ESP, drawings, fly/noclip/fullbright/prompt changes
+  (restored), closes the menu and destroys the UI holders.
 
 ## Tuning names
 
