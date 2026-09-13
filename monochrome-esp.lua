@@ -2225,10 +2225,10 @@ local function keypadSlotDigit(digitW)
 	return shown and string.match(tostring(shown), "%d") or nil
 end
 
--- Click one digit on the Keypad until its Readout shows the wanted char.
--- Methods in order: fireclickdetector (x4) -> VIM screen click on the digit
--- part (x3) -> VIM click on digit TextButtons. Verified each round; when
--- the Readout is unreadable, clicks are counted from the last known digit.
+-- Click one digit on the Keypad. The keypad is a CYCLER: every click is
+-- +1 (9 wraps to 0). So: read the current digit, compute the exact number
+-- of clicks needed (want - current) % 10, click, verify. If the digit
+-- label is unreadable, fall back to clicking and re-verifying.
 local function pressKeypadDigit(pad, w, want, force)
 	local digitW = pad:FindFirstChild("Digit" .. w, true)
 		or pad:FindFirstChild("digit" .. w, true)
@@ -2238,26 +2238,44 @@ local function pressKeypadDigit(pad, w, want, force)
 		or digitW:FindFirstChildOfClass("ClickDetector", true)
 	local dw = digitW:IsA("BasePart") and digitW or digitW:FindFirstChildWhichIsA("BasePart", true)
 
-	for round = 1, 10 do
-		if not State.autowin and not force then return false end
-		local shown = keypadSlotDigit(digitW)
-		if shown == want then return true end
-		if det and typeof(fireclickdetector) == "function" and round <= 5 then
+	local function clickOnce()
+		if det and typeof(fireclickdetector) == "function" then
 			pcall(fireclickdetector, det)
 		elseif dw and VIM then
 			screenClickPart(dw)
 		else
-			-- Last resort: digit TextButtons via VIM
 			local clicks, buttons = panelDigitControls(pad)
 			local btn = buttons[want]
 			if btn then clickButtonAt(btn) end
 		end
-		task.wait(0.3)
-		-- If the Readout is unreadable and we cycled past, stop counting.
-		local after = keypadSlotDigit(digitW)
-		if shown == nil and after == nil and round >= 6 then
-			return false -- cannot verify, cannot cycle blindly forever
+	end
+
+	local wantN = tonumber(want) or 0
+	for round = 1, 12 do
+		if not State.autowin and not force then return false end
+		local shown = keypadSlotDigit(digitW)
+		if shown == want then return true end
+		local cur = tonumber(shown)
+		if cur then
+			-- Deterministic: (want - current) mod 10 clicks, verified.
+			local needed = (wantN - cur) % 10
+			if needed == 0 then
+				-- Label stale or wrong: one nudge then re-read.
+				clickOnce()
+				task.wait(0.3)
+			else
+				for _ = 1, needed do
+					if not State.autowin and not force then return false end
+					clickOnce()
+					task.wait(0.25)
+				end
+			end
+		else
+			-- Unreadable label: click and hope the verify picks it up later.
+			clickOnce()
+			task.wait(0.3)
 		end
+		task.wait(0.2)
 	end
 	return keypadSlotDigit(digitW) == want
 end
