@@ -650,6 +650,81 @@ local function destroyDraw(e)
 	e.draw = nil
 end
 
+-- Calculate accurate 2D bounding box by projecting all 8 corners of 3D box
+local function calculateBox2D(target, part)
+	-- Get the size to use
+	local sz = e.boxSize or e.part.Size
+	if not sz then
+		if target and target:IsA("Model") then
+			local ok, size = pcall(function() return target:GetExtentsSize() end)
+			if ok and size then sz = size end
+		end
+		if not sz and part then sz = part.Size end
+		if not sz then sz = Vector3.new(4, 6, 2) end  -- fallback size
+	end
+
+	-- Get the center position (we already have pPos from drawEntry scope)
+	-- We'll calculate the 8 corners of the 3D bounding box
+	local halfSize = sz / 2
+	local corners = {
+		-- Bottom face (z = -halfSize.Z)
+		pPos + Vector3.new(-halfSize.X, -halfSize.Y, -halfSize.Z),
+		pPos + Vector3.new( halfSize.X, -halfSize.Y, -halfSize.Z),
+		pPos + Vector3.new(-halfSize.X,  halfSize.Y, -halfSize.Z),
+		pPos + Vector3.new( halfSize.X,  halfSize.Y, -halfSize.Z),
+		-- Top face (z = +halfSize.Z)
+		pPos + Vector3.new(-halfSize.X, -halfSize.Y,  halfSize.Z),
+		pPos + Vector3.new( halfSize.X, -halfSize.Y,  halfSize.Z),
+		pPos + Vector3.new(-halfSize.X,  halfSize.Y,  halfSize.Z),
+		pPos + Vector3.new( halfSize.X,  halfSize.Y,  halfSize.Z),
+	}
+
+	-- Project all corners to viewport space
+	local screenPoints = {}
+	local minX, minY = math.huge, math.huge
+	local maxX, maxY = -math.huge, -math.huge
+	local anyInFront = false
+
+	for _, corner in ipairs(corners) do
+		local screenPoint, onScreen = Camera:WorldToViewportPoint(corner)
+		if onScreen and screenPoint.Z > 0 then
+			anyInFront = true
+			screenPoints[#screenPoints + 1] = screenPoint
+			if screenPoint.X < minX then minX = screenPoint.X end
+			if screenPoint.X > maxX then maxX = screenPoint.X end
+			if screenPoint.Y < minY then minY = screenPoint.Y end
+			if screenPoint.Y > maxY then maxY = screenPoint.Y end
+		end
+	end
+
+	if not anyInFront or #screenPoints == 0 then
+		return nil -- no visible corners
+	end
+
+	-- Add some padding to avoid thin boxes
+	local padding = 2
+	minX = math.max(0, minX - padding)
+	minY = math.max(0, minY - padding)
+	maxX = min(Camera.ViewportSize.X, maxX + padding)
+	maxY = min(Camera.ViewportSize.Y, maxY + padding)
+
+	local width = maxX - minX
+	local height = maxY - minY
+
+	-- Ensure minimum size
+	if width < 8 then width = 8 end
+	if height < 8 then height = 8 end
+
+	return {
+		x = minX,
+		y = minY,
+		width = width,
+		height = height,
+		centerX = (minX + maxX) / 2,
+		centerY = (minY + maxY) / 2
+	}
+end
+
 local function drawEntry(e, origin)
 	local d = e.draw
 	if not d then return end
@@ -676,15 +751,32 @@ local function drawEntry(e, origin)
 		return
 	end
 
-	local sz = e.boxSize or e.part.Size
-	local top = Camera:WorldToViewportPoint(pPos + Vector3.new(0, sz.Y / 2, 0))
-	local bot = Camera:WorldToViewportPoint(pPos - Vector3.new(0, sz.Y / 2, 0))
-	local h = math.clamp(math.abs(top.Y - bot.Y), 8, 1200)
-	local w = math.clamp(h * 0.58, 8, 800)
-	local cx, cy = cPos.X, (top.Y + bot.Y) / 2
-	local ty, by = cy - h / 2, cy + h / 2
-	local lx, rx = cx - w / 2, cx + w / 2
-	local cl = math.max(math.min(w, h) * 0.28, 4)
+	-- Calculate accurate 2D bounding box
+	local box2D = calculateBox2D(target, part)
+	if not box2D then
+		-- Fallback to old method if 2D calculation fails
+		local sz = e.boxSize or e.part.Size
+		local top = Camera:WorldToViewportPoint(pPos + Vector3.new(0, sz.Y / 2, 0))
+		local bot = Camera:WorldToViewportPoint(pPos - Vector3.new(0, sz.Y / 2, 0))
+		local h = math.clamp(math.abs(top.Y - bot.Y), 8, 1200)
+		local w = math.clamp(h * 0.58, 8, 800)
+		local cx, cy = cPos.X, (top.Y + bot.Y) / 2
+		local ty, by = cy - h / 2, cy + h / 2
+		local lx, rx = cx - w / 2, cx + w / 2
+		local cl = math.max(math.min(w, h) * 0.28, 4)
+	else
+		-- Use calculated 2D box
+		local lx = box2D.x
+		local rx = box2D.x + box2D.width
+		local ty = box2D.y
+		local by = box2D.y + box2D.height
+		local cx = box2D.centerX
+		local cy = box2D.centerY
+
+		-- Corner size: 20% of smaller dimension, min 3px, max 20px
+		local cl = math.max(math.min(box2D.width, box2D.height) * 0.2, 3)
+		cl = math.min(cl, 20)
+	end
 	local col = kindColor(e.kind)
 
 	local pts = {
