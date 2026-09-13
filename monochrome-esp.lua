@@ -1,44 +1,69 @@
 -- ============================================================
 --  MONOCHROME ESP + UTILITIES (standalone)
 --  Game: MONOCHROME (PlaceId 134208374070897)
+--  UI: Zolar Ui (https://github.com/Da7mu/Ui-Collection)
 --
---  Standalone project. No Uranium, no libraries required.
+--  Standalone project. No Uranium, no libraries required
+--  (besides Zolar Ui, loaded remotely below).
 --  Run:
 --    loadstring(game:HttpGet("https://raw.githubusercontent.com/Korsac2026/monochrome/main/monochrome-esp.lua"))()
 --
---  Features:
---    1) Monster ESP : highlights the monster (outline + name + distance)
---    2) Key ESP     : marks key locations on the map
---    3) Code ESP    : marks WHERE the code IS (world texts/notes/screens
---                     showing digits), NOT the keypad where you type it
---    4) Noclip / Fly / Speed
---    5) Auto Win    : flies to the 4 keys, grabs them (E), opens the
---                     deadbolts, flies to the elevator panel with the code
---  All monochrome (black & white). RightShift shows/hides the GUI.
+--  Tabs:
+--    ESP      : Monster ESP, Key ESP, Code ESP (marks the NOTE/PAPER
+--               where the code IS, never the keypad where you type it)
+--    Movement : Noclip, Fly, Walk Speed, Fly Speed
+--    Auto     : Auto Win (opens drawers, grabs 4 keys, opens deadbolts,
+--               flies to the elevator panel with the code)
+--    Settings : theme, text size, unload
+--  Menu key: RightShift. All monochrome (black & white).
 -- ============================================================
 
-if getgenv and getgenv().MonochromeESP then
-	pcall(function() getgenv().MonochromeESP.Unload() end)
-	getgenv().MonochromeESP = nil
+-- ---------- cleanup previous run ----------
+pcall(function()
+	local old = getgenv and getgenv().MonochromeESP or nil
+	if old then
+		if old.Window then pcall(function() old.Window:SetOpen(false) end) end
+		if old.Unload then pcall(old.Unload) end
+	end
+	if getgenv then getgenv().MonochromeESP = nil end
+end)
+
+-- ---------- load Zolar Ui ----------
+local Zolar = nil
+do
+	local urls = {
+		"https://raw.githubusercontent.com/Da7mu/Ui-Collection/refs/heads/main/Zolar%20Ui/Library.lua",
+		"https://raw.githubusercontent.com/Da7mu/Ui-Collection/main/Zolar%20Ui/Library.lua",
+	}
+	local err
+	for i = 1, #urls do
+		local ok, lib = pcall(function()
+			return loadstring(game:HttpGet(urls[i]))()
+		end)
+		if ok and lib then Zolar = lib break end
+		err = lib
+	end
+	if not Zolar then
+		error("[Monochrome] Zolar Ui failed to load: " .. tostring(err), 0)
+	end
 end
+-- Keep our RightShift menu convention (Zolar default is G).
+pcall(function() Zolar.MenuKeybind = Enum.KeyCode.RightShift end)
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local LocalPlayer = Players.LocalPlayer
 local Camera = workspace.CurrentCamera
+local VIM = nil
+pcall(function() VIM = game:GetService("VirtualInputManager") end)
 
 local TARGET_PLACE = 134208374070897
 local KEYS_NEEDED = 4
 
--- Monochrome palette
+-- Monochrome palette (ESP visuals)
 local WHITE = Color3.new(1, 1, 1)
 local BLACK = Color3.new(0, 0, 0)
-local PANEL = Color3.fromRGB(12, 12, 12)
-local ROW_OFF = Color3.fromRGB(28, 28, 28)
-local ROW_ON = Color3.fromRGB(225, 225, 225)
-local TXT_ON = Color3.fromRGB(235, 235, 235)
-local TXT_DIM = Color3.fromRGB(150, 150, 150)
 
 -- Names that give away the monster (lowercase, partial match)
 local MONSTER_NAMES = {
@@ -58,13 +83,35 @@ local MONSTER_FOLDERS = {
 }
 -- Key names (world pickups AND inventory tools)
 local KEY_NAMES = { "key", "llave", "keycard" }
--- Entry/exit objects used by Auto Win navigation (NOT marked by Code ESP)
-local ENTRY_NAMES = { "keypad", "teclado", "panel", "elevator", "elevador" }
+-- Paper/note-like objects: this is WHERE the code IS (handwritten digits
+-- are baked into the paper texture, so text scanning alone misses them).
+local NOTE_NAMES = {
+	"note", "nota", "paper", "papel", "page", "pagina",
+	"sheet", "hoja", "sticky", "postit", "memo", "letter", "carta",
+	"diary", "diario", "notebook", "libreta", "cuaderno", "clue",
+	"pista", "hint", "document", "documento", "password", "contrasena",
+	"passcode", "cipher", "cifra", "cifrado", "code", "codigo", "pin",
+}
+-- Entry objects: where you TYPE the code. NEVER marked by Code ESP,
+-- only used internally by Auto Win navigation.
+local ENTRY_SKIP = {
+	"keypad", "teclado", "elevator", "elevador", "lock", "cerradura",
+	"locker", "casillero", "safe", "cajafuerte", "vault", "boveda",
+	"computer", "computadora", "ordenador", "terminal", "digit", "digito",
+	"button", "boton", "door", "puerta", "deadbolt", "cerrojo", "exit", "salida",
+}
+-- Containers Auto Win opens first (keys hide inside drawers)
+local DRAWER_NAMES = {
+	"drawer", "cajon", "dresser", "tocador", "cabinet", "gabinete",
+	"cupboard", "alacena", "crate", "caja", "chest", "cofre",
+	"container", "contenedor", "furniture", "mueble",
+}
+-- Blockers cleared at run start (boarded doorway)
+local PLANK_NAMES = { "plank", "tabla", "tablon", "pry", "palanca", "board", "madera", "nail", "clavo", "barricade", "barricada" }
+-- Exit / deadbolt objects
 local DEADBOLT_NAMES = { "deadbolt", "cerrojo", "exit", "salida", "door", "puerta" }
-
-local DIST_STEPS = { 150, 300, 500, 1000, 999999 }
-local DIST_LABELS = { "150m", "300m", "500m", "1000m", "INF" }
-local SPEED_STEPS = { 16, 24, 32, 50, 75, 100, 150 }
+-- Words that must never be treated as exit targets (hiding spots)
+local NEVER_EXIT = { "closet", "armario", "hide", "esconder" }
 
 local State = {
 	running = true,
@@ -74,23 +121,28 @@ local State = {
 	npcScan = false, -- mark ANY non-player humanoid as monster
 	noclip = false,
 	fly = false,
-	speedIdx = 1, -- index into SPEED_STEPS (16)
-	distStep = 3, -- index into DIST_STEPS (500m)
+	speed = 16, -- WalkSpeed
+	flySpeed = 70,
+	maxDist = 500,
+	textSize = 14,
 	autowin = false,
 }
 
 local Tracked = {} -- [instance] = {kind, target, part, hl, bb, txt, digits, label, root}
 local Connections = {}
-local Painters = {} -- GUI repaint functions set by buildGui
-local StatusText = "starting..."
+local UiRefs = {} -- Zolar control refs for programmatic sync
 
 local function trackConnection(conn)
 	Connections[#Connections + 1] = conn
 	return conn
 end
 
-local function setStatus(s)
-	StatusText = s
+local function notify(title, desc, icon)
+	if Zolar then
+		pcall(function()
+			Zolar:Notification({ Name = title, Description = desc or "", Icon = icon or "bell", Duration = 5 })
+		end)
+	end
 end
 
 local function lowerName(inst)
@@ -163,9 +215,12 @@ local function myHumanoid()
 	return char and char:FindFirstChildOfClass("Humanoid") or nil
 end
 
--- Classify a workspace instance. Returns kind ("monster"/"key") + label, or nil.
--- NOTE: codes are handled by the text scanner (scanCodeTexts), NOT by name,
--- so Code ESP marks where the code IS, never the keypad where you type it.
+local function isEntryObject(inst)
+	-- Keypads/panels/locks/safes are where you TYPE the code: never Code ESP.
+	return matchesAny(lowerName(inst), ENTRY_SKIP)
+end
+
+-- Classify a workspace instance. Returns kind ("monster"/"key"/"code") + label, or nil.
 local function classify(inst)
 	if typeof(inst) ~= "Instance" then return nil end
 	if not inst:IsA("Model") and not inst:IsA("Tool") and not inst:IsA("BasePart") then
@@ -194,6 +249,11 @@ local function classify(inst)
 	-- Keys
 	if matchesAny(name, KEY_NAMES) then
 		return "key", "KEY"
+	end
+	-- Code location: paper/note-like objects (handwritten code lives here).
+	-- Entry objects (keypads/panels/locks) are explicitly excluded.
+	if matchesAny(name, NOTE_NAMES) and not isEntryObject(inst) then
+		return "code", "NOTE"
 	end
 	return nil
 end
@@ -250,7 +310,7 @@ local function makeEspObjects(target, part)
 	txt.BackgroundTransparency = 1
 	txt.Size = UDim2.new(1, 0, 1, 0)
 	txt.Font = Enum.Font.GothamBold
-	txt.TextSize = 14
+	txt.TextSize = State.textSize
 	txt.TextColor3 = WHITE
 	txt.TextStrokeTransparency = 0
 	txt.TextStrokeColor3 = BLACK
@@ -292,8 +352,40 @@ local function digitsInString(s)
 	return nil
 end
 
--- Scan every world text for digits. This is what Code ESP marks:
--- the NOTE / SCREEN / PAPER where the code IS.
+-- Read digits inside an object subtree (screens, prompts, code values).
+local function extractDigits(root)
+	local found = nil
+	local ok, descendants = pcall(function() return root:GetDescendants() end)
+	if not ok or type(descendants) ~= "table" then return nil end
+	for i = 1, #descendants do
+		local d = descendants[i]
+		if d:IsA("TextLabel") or d:IsA("TextButton") then
+			local s = d.Text or ""
+			local m = digitsInString(s)
+			if m then
+				found = m
+				break
+			end
+		elseif d:IsA("ProximityPrompt") then
+			local s = tostring(d.ObjectText or "") .. " " .. tostring(d.ActionText or "")
+			local m = digitsInString(s)
+			if m then
+				found = m
+				break
+			end
+		elseif d:IsA("StringValue") or d:IsA("IntValue") or d:IsA("NumberValue") then
+			local n = lowerName(d)
+			if string.find(n, "code", 1, true) or string.find(n, "pass", 1, true) or string.find(n, "pin", 1, true) then
+				found = tostring(d.Value)
+				break
+			end
+		end
+	end
+	return found
+end
+
+-- Scan every world text for digits. Marks the NOTE/SCREEN/PAPER where the
+-- code IS (plus readable values). Keypads are never marked here.
 local function scanCodeTexts()
 	if not State.codes then return end
 	local descs = workspace:GetDescendants()
@@ -304,7 +396,7 @@ local function scanCodeTexts()
 			pcall(function() digits = digitsInString(d.Text) end)
 			if digits then
 				local part = adorneePartForText(d)
-				if part then
+				if part and not isEntryObject(part) and not isEntryObject(part.Parent) then
 					local hl, bb, txt = makeEspObjects(part, part)
 					Tracked[d] = { kind = "code", target = part, part = part, hl = hl, bb = bb, txt = txt, digits = digits, label = "CODE", root = d }
 				end
@@ -322,7 +414,7 @@ local function scanCodeTexts()
 						local _, p = resolveTarget(host)
 						part = p
 					end
-					if part then
+					if part and not isEntryObject(part) then
 						local hl, bb, txt = makeEspObjects(part, part)
 						Tracked[d] = { kind = "code", target = part, part = part, hl = hl, bb = bb, txt = txt, digits = string.sub(val, 1, 8), label = "CODE", root = d }
 					end
@@ -381,7 +473,11 @@ local function addEntry(inst)
 		return
 	end
 	local hl, bb, txt = makeEspObjects(target, part)
-	Tracked[inst] = { kind = kind, target = target, part = part, hl = hl, bb = bb, txt = txt, digits = nil, label = label, root = inst }
+	local digits = nil
+	if kind == "code" then
+		digits = extractDigits(inst)
+	end
+	Tracked[inst] = { kind = kind, target = target, part = part, hl = hl, bb = bb, txt = txt, digits = digits, label = label, root = inst }
 end
 
 local function fullScan()
@@ -402,8 +498,13 @@ local function rootPosition()
 	return Vector3.new(0, 0, 0)
 end
 
-local Gui = nil
 local StatusLabel = nil
+
+local function setStatus(s)
+	if StatusLabel then
+		pcall(function() StatusLabel:Set(s) end)
+	end
+end
 
 local function countTargets()
 	local m, k, c = 0, 0, 0
@@ -418,7 +519,7 @@ local function countTargets()
 end
 
 local function refreshCodeDigits(e)
-	-- Re-read live text (a code can appear later on the same label)
+	-- Re-read live state (a code can appear later, or a note can be taken).
 	if e.kind ~= "code" then return true end
 	local root = e.root
 	if root:IsA("TextLabel") or root:IsA("TextButton") then
@@ -436,6 +537,10 @@ local function refreshCodeDigits(e)
 			return true
 		end
 		return false
+	elseif root:IsA("Model") or root:IsA("BasePart") or root:IsA("Tool") then
+		-- Note/paper object: re-read its subtree, keep marking even without digits.
+		e.digits = extractDigits(root)
+		return true
 	end
 	return true
 end
@@ -470,8 +575,8 @@ local function updateEntry(e, origin, maxDist, refreshDigits)
 	e.hl.Enabled = true
 	e.bb.Enabled = true
 	local title = e.label
-	if e.kind == "code" and e.digits then
-		title = "CODE " .. e.digits
+	if e.kind == "code" then
+		title = e.digits and ("CODE " .. e.digits) or "NOTE"
 	end
 	e.txt.Text = title .. "\n" .. tostring(math.floor(dist)) .. "m"
 	return true
@@ -485,8 +590,19 @@ local FlyKeys = { W = false, A = false, S = false, D = false, Up = false, Down =
 local function applySpeed()
 	local hum = myHumanoid()
 	if hum then
-		pcall(function() hum.WalkSpeed = SPEED_STEPS[State.speedIdx] end)
+		pcall(function() hum.WalkSpeed = State.speed end)
 	end
+end
+
+-- Aggressive enforcement: the game resets WalkSpeed constantly (sprint/
+-- stamina system), so re-apply instantly on change plus every frame.
+local function watchSpeed(hum)
+	if not hum then return end
+	trackConnection(hum:GetPropertyChangedSignal("WalkSpeed"):Connect(function()
+		if State.running and hum.Parent and hum.WalkSpeed ~= State.speed then
+			pcall(function() hum.WalkSpeed = State.speed end)
+		end
+	end))
 end
 
 local function setNoclipParts(collide)
@@ -533,7 +649,7 @@ local function flyStep()
 	if not State.fly or not FlyBV or not FlyBG then return end
 	local hrp = myHRP()
 	if not hrp or not Camera then return end
-	local speed = SPEED_STEPS[State.speedIdx] + 44 -- fly a bit faster than walk
+	local speed = State.flySpeed
 	local cf = Camera.CFrame
 	local move = Vector3.new(0, 0, 0)
 	if FlyKeys.W then move = move + cf.LookVector end
@@ -553,12 +669,31 @@ end
 
 -- ===================== INTERACTION (grab / prompts) =====================
 
+-- Simulate holding E (fallback when fireproximityprompt is missing).
+local function pressE(holdTime)
+	if not VIM then return false end
+	holdTime = holdTime or 0.3
+	local ok = false
+	pcall(function()
+		VIM:SendKeyEvent(true, Enum.KeyCode.E, false, game)
+		ok = true
+	end)
+	if not ok then return false end
+	task.wait(holdTime)
+	pcall(function() VIM:SendKeyEvent(false, Enum.KeyCode.E, false, game) end)
+	return true
+end
+
+-- Fire one prompt: executor fast-path, else real E-hold in range.
 local function firePrompt(prompt)
 	if typeof(prompt) ~= "Instance" or not prompt:IsA("ProximityPrompt") then return end
+	if not prompt.Enabled then return end
 	if typeof(fireproximityprompt) == "function" then
 		pcall(fireproximityprompt, prompt)
+		task.wait((prompt.HoldDuration or 0) + 0.3)
+		return
 	end
-	task.wait((prompt.HoldDuration or 0) + 0.25)
+	pressE((prompt.HoldDuration or 0) + 0.4)
 end
 
 local function firePromptsIn(model)
@@ -570,6 +705,34 @@ local function firePromptsIn(model)
 			firePrompt(descs[i])
 		end
 	end
+end
+
+local function promptRootPart(prompt)
+	local host = prompt.Parent
+	if host and host:IsA("BasePart") then return host end
+	local node = host
+	while node and node ~= workspace do
+		if node:IsA("BasePart") then return node end
+		local found = node:FindFirstChildWhichIsA("BasePart", false)
+		if found then return found end
+		node = node.Parent
+	end
+	if host then
+		local _, part = resolveTarget(host)
+		return part
+	end
+	return nil
+end
+
+-- Stand on a prompt (inside its activation range) and use it.
+local function usePrompt(prompt)
+	local part = promptRootPart(prompt)
+	if part then
+		flyTo(part.Position + Vector3.new(0, 3, 0), 10)
+		if not State.autowin then return false end
+	end
+	firePrompt(prompt)
+	return true
 end
 
 local function countKeysHeld()
@@ -603,6 +766,13 @@ local function flyTo(pos, timeout)
 	return false
 end
 
+local function waitRespawn()
+	while State.autowin and State.running and not myHRP() do
+		task.wait(0.5)
+	end
+	task.wait(0.5)
+end
+
 local function keyTargets()
 	local list = {}
 	for inst, e in pairs(Tracked) do
@@ -624,34 +794,43 @@ local function nearestKey(origin)
 	return best
 end
 
--- Objects with prompts where keys get used (deadbolts / exit / doors)
-local function deadboltTargets()
-	local list = {}
+-- Prompts whose host matches a name list (broad scan for autowin phases).
+local function scanPrompts(nameList, excludeList, limit)
+	local out = {}
 	for _, inst in ipairs(workspace:GetDescendants()) do
 		if inst:IsA("ProximityPrompt") then
 			local host = inst.Parent
 			local scope = host and host.Parent or nil
 			local hay = lowerName(host) .. " " .. lowerName(scope)
 			local hit = false
-			for i = 1, #DEADBOLT_NAMES do
-				if string.find(hay, DEADBOLT_NAMES[i], 1, true) then hit = true break end
+			for i = 1, #nameList do
+				if string.find(hay, nameList[i], 1, true) then hit = true break end
+			end
+			if hit and excludeList then
+				for i = 1, #excludeList do
+					if string.find(hay, excludeList[i], 1, true) then hit = false break end
+				end
 			end
 			if hit then
-				local part = host:IsA("BasePart") and host or (host and host:FindFirstChildWhichIsA("BasePart", true))
+				local part = promptRootPart(inst)
 				if part then
-					list[#list + 1] = { prompt = inst, pos = part.Position }
+					out[#out + 1] = { prompt = inst, pos = part.Position }
+					if limit and #out >= limit then break end
 				end
 			end
 		end
 	end
-	return list
+	return out
 end
 
--- Elevator / code entry panel position (internal navigation only)
+-- Elevator / code entry panel position (internal navigation only).
 local function findEntryPanel()
 	for _, inst in ipairs(workspace:GetDescendants()) do
 		if inst:IsA("Model") or inst:IsA("BasePart") then
-			if matchesAny(lowerName(inst), ENTRY_NAMES) then
+			local n = lowerName(inst)
+			local hit = string.find(n, "keypad", 1, true) or string.find(n, "panel", 1, true)
+				or string.find(n, "elevator", 1, true)
+			if hit then
 				local hasIO = false
 				pcall(function()
 					hasIO = inst:FindFirstChildWhichIsA("ProximityPrompt", true) ~= nil
@@ -685,54 +864,103 @@ local function pressPanelDigits(panelModel, code)
 	end
 end
 
+local function grabKey(inst)
+	local before = countKeysHeld()
+	for attempt = 1, 4 do
+		if not State.autowin or not State.running then return false end
+		if not inWorkspace(inst) then return true end
+		waitRespawn()
+		local _, part = resolveTarget(inst)
+		local pos = part and part.Position or nil
+		if pos and not flyTo(pos + Vector3.new(0, 3.5, 0), 10) then
+			-- Could not reach: try next key, come back later
+			return false
+		end
+		if not State.autowin then return false end
+		firePromptsIn(inst)
+		pressE(0.6)
+		local hrp = myHRP()
+		if hrp and part and inWorkspace(part) then
+			hrp.CFrame = part.CFrame + Vector3.new(0, 3, 0)
+		end
+		task.wait(0.7)
+		if not inWorkspace(inst) or countKeysHeld() > before then return true end
+	end
+	return (not inWorkspace(inst)) or countKeysHeld() > before
+end
+
 local function autoWinLoop()
 	while State.autowin and State.running do
-		-- Phase 1: collect the 4 keys
-		setStatus("AUTO WIN: collecting keys (" .. countKeysHeld() .. "/" .. KEYS_NEEDED .. ")")
-		local guard = 0
-		while State.autowin and State.running and countKeysHeld() < KEYS_NEEDED and guard < 24 do
-			guard = guard + 1
-			local target = nearestKey(rootPosition())
-			if not target then
-				fullScan()
-				scanCodeTexts()
-				target = nearestKey(rootPosition())
-				if not target then break end
-			end
-			if flyTo(target.pos + Vector3.new(0, 4, 0)) then
-				local inst = target.inst
-				local before = countKeysHeld()
-				for attempt = 1, 3 do
-					if not State.autowin then break end
-					firePromptsIn(inst)
-					local hrp = myHRP()
-					if hrp and inWorkspace(inst) then
-						local _, part = resolveTarget(inst)
-						if part then
-							hrp.CFrame = part.CFrame + Vector3.new(0, 3, 0)
-						end
-					end
-					task.wait(0.6)
-					if not inWorkspace(inst) or countKeysHeld() > before then break end
+		waitRespawn()
+		if not State.autowin then break end
+
+		-- Phase 0: pry planks / boards blocking the way in
+		setStatus("AUTO WIN: clearing entrance")
+		notify("Auto Win", "Phase 1/4: clearing entrance", "door-open")
+		for _, t in ipairs(scanPrompts(PLANK_NAMES, nil, 12)) do
+			if not State.autowin then break end
+			waitRespawn()
+			usePrompt(t.prompt)
+			task.wait(0.3)
+		end
+		if not State.autowin then break end
+
+		-- Phase 1: open drawers/containers (keys hide inside)
+		setStatus("AUTO WIN: opening drawers")
+		notify("Auto Win", "Phase 2/4: opening drawers", "archive")
+		do
+			local seen = {}
+			for _, t in ipairs(scanPrompts(DRAWER_NAMES, nil, 60)) do
+				if not State.autowin then break end
+				waitRespawn()
+				local key = tostring(t.prompt:GetDebugId())
+				if not seen[key] then
+					seen[key] = true
+					usePrompt(t.prompt)
+					task.wait(0.25)
 				end
 			end
-			task.wait(0.2)
 		end
-		if not State.autowin or not State.running then break end
+		if not State.autowin then break end
+		fullScan()
+		scanCodeTexts()
 
-		-- Phase 2: use keys on deadbolts / exit
-		setStatus("AUTO WIN: opening deadbolts (" .. countKeysHeld() .. "/" .. KEYS_NEEDED .. " keys)")
-		for _, db in ipairs(deadboltTargets()) do
-			if not State.autowin then break end
-			if flyTo(db.pos + Vector3.new(0, 3, 0), 10) then
-				firePrompt(db.prompt)
-				firePrompt(db.prompt)
-				task.wait(0.4)
+		-- Phase 2: collect the 4 keys
+		setStatus("AUTO WIN: collecting keys (" .. countKeysHeld() .. "/" .. KEYS_NEEDED .. ")")
+		notify("Auto Win", "Phase 3/5: collecting keys", "key")
+		do
+			local guard = 0
+			while State.autowin and State.running and countKeysHeld() < KEYS_NEEDED and guard < 30 do
+				guard = guard + 1
+				waitRespawn()
+				if not State.autowin then break end
+				local target = nearestKey(rootPosition())
+				if not target then
+					fullScan()
+					target = nearestKey(rootPosition())
+					if not target then break end
+				end
+				grabKey(target.inst)
+				setStatus("AUTO WIN: collecting keys (" .. countKeysHeld() .. "/" .. KEYS_NEEDED .. ")")
+				task.wait(0.2)
 			end
 		end
-		if not State.autowin or not State.running then break end
+		if not State.autowin then break end
 
-		-- Phase 3: elevator panel + code
+		-- Phase 3: deadbolts / exit
+		setStatus("AUTO WIN: opening deadbolts (" .. countKeysHeld() .. "/" .. KEYS_NEEDED .. " keys)")
+		notify("Auto Win", "Phase 4/5: opening exit", "lock-open")
+		for _, t in ipairs(scanPrompts(DEADBOLT_NAMES, NEVER_EXIT, 20)) do
+			if not State.autowin then break end
+			waitRespawn()
+			usePrompt(t.prompt)
+			task.wait(0.3)
+			usePrompt(t.prompt)
+			task.wait(0.3)
+		end
+		if not State.autowin then break end
+
+		-- Phase 4: elevator panel + code
 		local code = getFoundCode()
 		if not code then
 			scanCodeTexts()
@@ -740,278 +968,199 @@ local function autoWinLoop()
 		end
 		local panel, panelPos = findEntryPanel()
 		if panel and panelPos then
+			waitRespawn()
 			flyTo(panelPos + Vector3.new(0, 4, 0))
 			if code and #code == 4 then
 				setStatus("AUTO WIN: entering code " .. code)
+				notify("Auto Win", "Entering code " .. code, "hash")
 				pressPanelDigits(panel, code)
 				task.wait(1)
 			end
 		end
 		if code then
 			setStatus("AUTO WIN done. Code: " .. code)
+			notify("Auto Win finished", "Code: " .. code .. " — check the elevator", "check")
 		else
 			setStatus("AUTO WIN done. Code not found, enter it manually.")
+			notify("Auto Win finished", "Code not found — read the NOTE marks", "info")
 		end
 		State.autowin = false
-		if Painters.autowin then Painters.autowin(false) end
+		if UiRefs.autoTgl then pcall(function() UiRefs.autoTgl:Set(false) end) end
 		break
 	end
 end
 
--- ===================== GUI =====================
+-- ===================== ZOLAR UI =====================
 
-local function uiParent()
-	local ok, hui = pcall(function() return gethui and gethui() end)
-	if ok and hui then return hui end
-	local ok2, cg = pcall(function() return game:GetService("CoreGui") end)
-	if ok2 and cg then return cg end
-	return LocalPlayer:FindFirstChildOfClass("PlayerGui")
+local Window, StatusLabel = nil, nil
+
+local function setToggle(ref, v)
+	if ref then pcall(function() ref:Set(v) end) end
 end
-
-local function makeRow(parent, order, text, initial, callback)
-	local btn = Instance.new("TextButton")
-	btn.Name = "Row" .. text
-	btn.Size = UDim2.new(1, -16, 0, 32)
-	btn.Position = UDim2.new(0, 8, 0, 44 + (order - 1) * 36)
-	btn.BackgroundColor3 = initial and ROW_ON or ROW_OFF
-	btn.BorderSizePixel = 0
-	btn.AutoButtonColor = false
-	btn.Font = Enum.Font.GothamBold
-	btn.TextSize = 13
-	btn.TextXAlignment = Enum.TextXAlignment.Left
-	btn.Text = "  " .. text
-	btn.TextColor3 = initial and BLACK or TXT_ON
-	btn.Parent = parent
-	local corner = Instance.new("UICorner")
-	corner.CornerRadius = UDim.new(0, 6)
-	corner.Parent = btn
-	local state = Instance.new("TextLabel")
-	state.BackgroundTransparency = 1
-	state.Size = UDim2.new(0, 52, 1, 0)
-	state.Position = UDim2.new(1, -56, 0, 0)
-	state.Font = Enum.Font.GothamBold
-	state.TextSize = 12
-	state.TextXAlignment = Enum.TextXAlignment.Right
-	state.Text = ""
-	state.TextColor3 = initial and BLACK or TXT_DIM
-	state.Parent = btn
-	local on = initial
-	local function paint(v)
-		if v ~= nil then on = v end
-		btn.BackgroundColor3 = on and ROW_ON or ROW_OFF
-		btn.TextColor3 = on and BLACK or TXT_ON
-		state.TextColor3 = on and BLACK or TXT_DIM
-		state.Text = on and "ON" or "OFF"
-	end
-	paint()
-	btn.MouseButton1Click:Connect(function()
-		paint(not on)
-		callback(on)
-	end)
-	return btn, paint
-end
-
-local function makeCycle(parent, order, prefix, labels, initialIdx, callback)
-	local btn = Instance.new("TextButton")
-	btn.Size = UDim2.new(1, -16, 0, 32)
-	btn.Position = UDim2.new(0, 8, 0, 44 + (order - 1) * 36)
-	btn.BackgroundColor3 = ROW_OFF
-	btn.BorderSizePixel = 0
-	btn.AutoButtonColor = false
-	btn.Font = Enum.Font.GothamBold
-	btn.TextSize = 13
-	btn.TextXAlignment = Enum.TextXAlignment.Left
-	btn.TextColor3 = TXT_ON
-	btn.Parent = parent
-	local corner = Instance.new("UICorner")
-	corner.CornerRadius = UDim.new(0, 6)
-	corner.Parent = btn
-	local idx = initialIdx
-	local function paint()
-		btn.Text = "  " .. prefix .. labels[idx]
-	end
-	paint()
-	btn.MouseButton1Click:Connect(function()
-		idx = idx + 1
-		if idx > #labels then idx = 1 end
-		paint()
-		callback(idx)
-	end)
-	return btn
-end
-
-local ROWS = 9
 
 local function buildGui()
-	local parent = uiParent()
-	local screen = Instance.new("ScreenGui")
-	screen.Name = "MonochromeESP"
-	screen.ResetOnSpawn = false
-	screen.IgnoreGuiInset = true
-	screen.DisplayOrder = 9999
-	screen.Parent = parent
+	local window = Zolar:Window({
+		Name = "MONOCHROME",
+		Icon = "eye",
+		Accent = Color3.fromRGB(235, 235, 235),
+	})
 
-	local height = 44 + ROWS * 36 + 62
-	local main = Instance.new("Frame")
-	main.Name = "Main"
-	main.Size = UDim2.new(0, 250, 0, height)
-	main.Position = UDim2.new(0, 24, 0.5, -height / 2)
-	main.BackgroundColor3 = PANEL
-	main.BorderSizePixel = 0
-	main.Active = true
-	main.Parent = screen
+	-- ESP tab
+	local espTab = window:Tab({ Name = "ESP", Icon = "eye" })
+	local espMonster = espTab:SubTab({ Name = "Monster", Icon = "ghost" })
+	local espItems = espTab:SubTab({ Name = "Items", Icon = "scan-eye" })
 
-	local stroke = Instance.new("UIStroke")
-	stroke.Color = WHITE
-	stroke.Thickness = 1
-	stroke.Transparency = 0.25
-	stroke.Parent = main
-	local corner = Instance.new("UICorner")
-	corner.CornerRadius = UDim.new(0, 8)
-	corner.Parent = main
+	local mSec = espMonster:Section({ Name = "Monster", Side = 1 })
+	UiRefs.monsterTgl = mSec:Toggle({
+		Name = "Monster ESP", Default = State.monster, Flag = "mono_monster",
+		Callback = function(v)
+			State.monster = v
+			if v then fullScan() else clearKind("monster") end
+		end,
+	})
+	mSec:Toggle({
+		Name = "NPC scan (any humanoid)", Default = State.npcScan, Flag = "mono_npcscan",
+		Callback = function(v)
+			State.npcScan = v
+			clearKind("monster")
+			if State.monster then fullScan() end
+		end,
+	})
+	mSec:Paragraph({
+		Title = "How it works",
+		Content = "Monster ESP outlines the monster with name + distance. If the monster uses an odd name, enable NPC scan.",
+	})
 
-	local title = Instance.new("TextLabel")
-	title.Name = "Title"
-	title.Size = UDim2.new(1, -40, 0, 36)
-	title.Position = UDim2.new(0, 12, 0, 0)
-	title.BackgroundTransparency = 1
-	title.Font = Enum.Font.GothamBold
-	title.TextSize = 15
-	title.TextXAlignment = Enum.TextXAlignment.Left
-	title.TextColor3 = TXT_ON
-	title.Text = "MONOCHROME ESP"
-	title.Active = true
-	title.Parent = main
+	local iSec = espItems:Section({ Name = "Keys & Code", Side = 1 })
+	iSec:Toggle({
+		Name = "Key ESP", Default = State.keys, Flag = "mono_keys",
+		Callback = function(v)
+			State.keys = v
+			if v then fullScan() else clearKind("key") end
+		end,
+	})
+	iSec:Toggle({
+		Name = "Code ESP (notes)", Default = State.codes, Flag = "mono_codes",
+		Callback = function(v)
+			State.codes = v
+			if v then scanCodeTexts() else clearKind("code") end
+		end,
+	})
+	iSec:Paragraph({
+		Title = "Code ESP",
+		Content = "Marks the NOTE / PAPER where the code IS (handwritten). It never marks the keypad where you type it.",
+	})
 
-	local close = Instance.new("TextButton")
-	close.Size = UDim2.new(0, 28, 0, 28)
-	close.Position = UDim2.new(1, -34, 0, 4)
-	close.BackgroundTransparency = 1
-	close.Font = Enum.Font.GothamBold
-	close.TextSize = 15
-	close.TextColor3 = TXT_DIM
-	close.Text = "X"
-	close.Parent = main
+	local vSec = espItems:Section({ Name = "View", Side = 2 })
+	vSec:Slider({
+		Name = "Max distance", Min = 100, Max = 2000, Default = State.maxDist, Suffix = "m", Flag = "mono_maxdist",
+		Callback = function(v) State.maxDist = v end,
+	})
+	vSec:Slider({
+		Name = "Text size", Min = 10, Max = 24, Default = State.textSize, Flag = "mono_textsize",
+		Callback = function(v)
+			State.textSize = v
+			for _, e in pairs(Tracked) do
+				if e.txt then pcall(function() e.txt.TextSize = v end) end
+			end
+		end,
+	})
 
-	-- Drag from the title bar
-	local dragging, dragStart, startPos = false, nil, nil
-	title.InputBegan:Connect(function(input)
-		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-			dragging = true
-			dragStart = input.Position
-			startPos = main.Position
-		end
-	end)
-	local function onDragChanged(input)
-		if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
-			local d = input.Position - dragStart
-			main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
-		end
-	end
-	local function onDragEnded(input)
-		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-			dragging = false
-		end
-	end
+	-- Movement tab
+	local movTab = window:Tab({ Name = "Movement", Icon = "wind" })
+	local movMain = movTab:SubTab({ Name = "Main", Icon = "move" })
+	local movSec = movMain:Section({ Name = "Movement", Side = 1 })
+	UiRefs.noclipTgl = movSec:Toggle({
+		Name = "Noclip", Default = State.noclip, Flag = "mono_noclip",
+		Callback = function(v)
+			State.noclip = v
+			if not v then setNoclipParts(true) end
+		end,
+	})
+	UiRefs.flyTgl = movSec:Toggle({
+		Name = "Fly (WASD + Space/Shift)", Default = State.fly, Flag = "mono_fly",
+		Callback = function(v)
+			State.fly = v
+			if v then enableFly() else disableFly() end
+		end,
+	})
+	local spdSec = movMain:Section({ Name = "Speed", Side = 2 })
+	spdSec:Slider({
+		Name = "Walk speed", Min = 16, Max = 150, Default = State.speed, Flag = "mono_speed",
+		Callback = function(v)
+			State.speed = v
+			applySpeed()
+		end,
+	})
+	spdSec:Slider({
+		Name = "Fly speed", Min = 20, Max = 150, Default = State.flySpeed, Flag = "mono_flyspeed",
+		Callback = function(v) State.flySpeed = v end,
+	})
+	spdSec:Paragraph({
+		Title = "Speed",
+		Content = "Walk speed is re-applied constantly because the game keeps resetting it.",
+	})
 
-	-- Rows
-	local _, pMonster = makeRow(main, 1, "MONSTER ESP", State.monster, function(v)
-		State.monster = v
-		if v then fullScan() else clearKind("monster") end
-	end)
-	local _, pKeys = makeRow(main, 2, "KEY ESP", State.keys, function(v)
-		State.keys = v
-		if v then fullScan() else clearKind("key") end
-	end)
-	local _, pCodes = makeRow(main, 3, "CODE ESP", State.codes, function(v)
-		State.codes = v
-		if v then scanCodeTexts() else clearKind("code") end
-	end)
-	local _, pNpc = makeRow(main, 4, "NPC SCAN (any humanoid)", State.npcScan, function(v)
-		State.npcScan = v
-		clearKind("monster")
-		if State.monster then fullScan() end
-	end)
-	local _, pNoclip = makeRow(main, 5, "NOCLIP", State.noclip, function(v)
-		State.noclip = v
-		if not v then setNoclipParts(true) end
-	end)
-	local _, pFly = makeRow(main, 6, "FLY", State.fly, function(v)
-		State.fly = v
-		if v then enableFly() else disableFly() end
-	end)
-	makeCycle(main, 7, "SPEED: ", { "16", "24", "32", "50", "75", "100", "150" }, State.speedIdx, function(idx)
-		State.speedIdx = idx
-		applySpeed()
-	end)
-	makeCycle(main, 8, "MAX DIST: ", DIST_LABELS, State.distStep, function(idx)
-		State.distStep = idx
-	end)
-	local _, pAuto = makeRow(main, 9, "AUTO WIN", State.autowin, function(v)
-		State.autowin = v
-		if v then
-			State.noclip = true
-			if Painters.noclip then Painters.noclip(true) end
-			State.fly = true
-			if Painters.fly then Painters.fly(true) end
-			enableFly()
-			task.spawn(autoWinLoop)
-		end
-	end)
+	-- Auto tab
+	local autoTab = window:Tab({ Name = "Auto", Icon = "zap" })
+	local autoMain = autoTab:SubTab({ Name = "Win", Icon = "trophy" })
+	local autoSec = autoMain:Section({ Name = "Auto Win", Side = 1 })
+	UiRefs.autoTgl = autoSec:Toggle({
+		Name = "Auto Win", Default = false, Flag = "mono_autowin",
+		Callback = function(v)
+			State.autowin = v
+			if v then
+				State.noclip = true
+				setToggle(UiRefs.noclipTgl, true)
+				State.fly = true
+				setToggle(UiRefs.flyTgl, true)
+				enableFly()
+				task.spawn(autoWinLoop)
+			end
+		end,
+	})
+	autoSec:Paragraph({
+		Title = "What it does",
+		Content = "1 clears entrance, 2 opens drawers, 3 grabs 4 keys, 4 opens deadbolts, 5 flies to the elevator with the code.",
+	})
+	local statSec = autoMain:Section({ Name = "Status", Side = 2 })
+	StatusLabel = statSec:Label({ Name = "starting..." })
 
-	Painters.noclip = pNoclip
-	Painters.fly = pFly
-	Painters.autowin = pAuto
-	Painters.monster = pMonster
-	Painters.keys = pKeys
-	Painters.codes = pCodes
-	Painters.npc = pNpc
+	-- Settings tab
+	local setTab = window:Tab({ Name = "Settings", Icon = "settings" })
+	local cfgSub = setTab:SubTab({ Name = "Config", Icon = "save" })
+	cfgSub:ThemeConfig({ })
+	local miscSub = setTab:SubTab({ Name = "Misc", Icon = "info" })
+	local miscSec = miscSub:Section({ Name = "Script", Side = 1 })
+	miscSec:Button({
+		Name = "Unload script",
+		Callback = function()
+			if getgenv and getgenv().MonochromeESP and getgenv().MonochromeESP.Unload then
+				pcall(getgenv().MonochromeESP.Unload)
+				getgenv().MonochromeESP = nil
+			end
+		end,
+	})
+	miscSec:Paragraph({
+		Title = "Help",
+		Content = "RightShift toggles this menu. E interacts, F torch, Shift sprint. In first person press M to free the mouse.",
+	})
 
-	StatusLabel = Instance.new("TextLabel")
-	StatusLabel.Size = UDim2.new(1, -16, 0, 30)
-	StatusLabel.Position = UDim2.new(0, 8, 1, -58)
-	StatusLabel.BackgroundTransparency = 1
-	StatusLabel.Font = Enum.Font.Code
-	StatusLabel.TextSize = 12
-	StatusLabel.TextXAlignment = Enum.TextXAlignment.Left
-	StatusLabel.TextColor3 = TXT_DIM
-	StatusLabel.TextTruncate = Enum.TextTruncate.AtEnd
-	StatusLabel.Text = "starting..."
-	StatusLabel.Parent = main
-
-	local hint = Instance.new("TextLabel")
-	hint.Size = UDim2.new(1, -16, 0, 18)
-	hint.Position = UDim2.new(0, 8, 1, -26)
-	hint.BackgroundTransparency = 1
-	hint.Font = Enum.Font.Code
-	hint.TextSize = 11
-	hint.TextXAlignment = Enum.TextXAlignment.Left
-	hint.TextColor3 = TXT_DIM
-	hint.Text = "RightShift: show / hide - WASD+Space fly"
-	hint.Parent = main
-
-	return screen, main, close, onDragChanged, onDragEnded
+	window:Watermark({ Name = "MONOCHROME" })
+	return window
 end
 
 -- ===================== STARTUP =====================
 
 EspFolder = Instance.new("Folder")
 EspFolder.Name = "MonoESP"
-EspFolder.Parent = uiParent()
-
-local DragChanged, DragEnded
-Gui, _, CloseBtn, DragChanged, DragEnded = buildGui()
-local MainFrame = Gui:FindFirstChild("Main")
-
-trackConnection(UserInputService.InputChanged:Connect(DragChanged))
-trackConnection(UserInputService.InputEnded:Connect(DragEnded))
-
-trackConnection(CloseBtn.MouseButton1Click:Connect(function()
-	if getgenv and getgenv().MonochromeESP then
-		pcall(function() getgenv().MonochromeESP.Unload() end)
-		getgenv().MonochromeESP = nil
-	end
-end))
+do
+	local ok, parent = pcall(function()
+		if gethui then return gethui() end
+		return game:GetService("CoreGui")
+	end)
+	EspFolder.Parent = (ok and parent) or workspace
+end
 
 trackConnection(UserInputService.InputBegan:Connect(function(input, gpe)
 	if input.KeyCode == Enum.KeyCode.W then FlyKeys.W = true end
@@ -1020,10 +1169,6 @@ trackConnection(UserInputService.InputBegan:Connect(function(input, gpe)
 	if input.KeyCode == Enum.KeyCode.D then FlyKeys.D = true end
 	if input.KeyCode == Enum.KeyCode.Space then FlyKeys.Up = true end
 	if input.KeyCode == Enum.KeyCode.LeftShift then FlyKeys.Down = true end
-	if gpe then return end
-	if input.KeyCode == Enum.KeyCode.RightShift and MainFrame then
-		MainFrame.Visible = not MainFrame.Visible
-	end
 end))
 
 trackConnection(UserInputService.InputEnded:Connect(function(input)
@@ -1047,7 +1192,7 @@ trackConnection(workspace.DescendantAdded:Connect(function(inst)
 			pcall(function() digits = digitsInString(inst.Text) end)
 			if digits then
 				local part = adorneePartForText(inst)
-				if part then
+				if part and not isEntryObject(part) then
 					local hl, bb, txt = makeEspObjects(part, part)
 					Tracked[inst] = { kind = "code", target = part, part = part, hl = hl, bb = bb, txt = txt, digits = digits, label = "CODE", root = inst }
 				end
@@ -1062,19 +1207,31 @@ trackConnection(workspace.DescendantRemoving:Connect(function(inst)
 	end
 end))
 
-trackConnection(LocalPlayer.CharacterAdded:Connect(function()
+trackConnection(LocalPlayer.CharacterAdded:Connect(function(char)
 	task.wait(1)
 	applySpeed()
+	local hum = char:FindFirstChildOfClass("Humanoid")
+	if hum then watchSpeed(hum) end
 	if State.fly then enableFly() end
 end))
 
+do
+	local hum = myHumanoid()
+	if hum then watchSpeed(hum) end
+end
 applySpeed()
 fullScan()
+
+Window = buildGui()
 
 local accDist, accCode, accText = 0, 0, 0
 trackConnection(RunService.Heartbeat:Connect(function(dt)
 	if not State.running then return end
-	-- Movement systems
+	-- Movement systems run every frame (game resets speed constantly)
+	local hum = myHumanoid()
+	if hum and hum.WalkSpeed ~= State.speed then
+		applySpeed()
+	end
 	if State.noclip then
 		local char = myCharacter()
 		if char then
@@ -1101,7 +1258,7 @@ trackConnection(RunService.Heartbeat:Connect(function(dt)
 	end
 	if not doDist and not doCode then return end
 	local origin = rootPosition()
-	local maxDist = DIST_STEPS[State.distStep]
+	local maxDist = State.maxDist
 	local dead = {}
 	for inst, e in pairs(Tracked) do
 		if not isKindEnabled(e.kind) then
@@ -1125,19 +1282,21 @@ trackConnection(RunService.Heartbeat:Connect(function(dt)
 				note = " (outside MONOCHROME)"
 			end
 			local codeTxt = code and ("  code:" .. code) or ""
-			StatusLabel.Text = "monster:" .. m .. "  key:" .. k .. "  code:" .. c .. codeTxt .. "  keys:" .. countKeysHeld() .. "/4" .. note
-		else
-			StatusLabel.Text = StatusText
+			pcall(function()
+				StatusLabel:Set("monster:" .. m .. "  key:" .. k .. "  code:" .. c .. codeTxt .. "  keys:" .. countKeysHeld() .. "/4" .. note)
+			end)
 		end
-	end
-	-- Keep walkspeed applied (the game may reset it)
-	local hum = myHumanoid()
-	if hum and hum.WalkSpeed ~= SPEED_STEPS[State.speedIdx] then
-		applySpeed()
 	end
 end))
 
+if game.PlaceId ~= TARGET_PLACE then
+	notify("MONOCHROME", "Outside MONOCHROME — ESP still active", "info")
+else
+	notify("MONOCHROME loaded", "Press RightShift for the menu", "check")
+end
+
 local Api = {}
+Api.Window = Window
 function Api.Unload()
 	State.running = false
 	State.autowin = false
@@ -1151,7 +1310,7 @@ function Api.Unload()
 		removeEntry(inst)
 	end
 	pcall(function() EspFolder:Destroy() end)
-	pcall(function() Gui:Destroy() end)
+	if Window then pcall(function() Window:SetOpen(false) end) end
 end
 
 if getgenv then
