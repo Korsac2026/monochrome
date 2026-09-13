@@ -197,6 +197,7 @@ local State = {
 	playerEsp = false, -- see other players (trolling tab)
 	visit = false, -- visit-loop: TP to each player in turn
 	visitDelay = 3,
+	loopTpToMonster = false, -- loop TP players to VER
 	instantPrompt = false,
 	fullbright = false,
 	autowin = false,
@@ -341,7 +342,11 @@ local function classify(inst)
 	if isUnderPlayer(inst) then return nil end
 	-- Loose parts inside a model are evaluated through the model
 	if inst:IsA("BasePart") and inst.Parent and (inst.Parent:IsA("Model") or inst.Parent:IsA("Tool")) then
-		return nil
+		-- Allow closet-named parts through even inside models
+		local bpName = lowerName(inst)
+		if not matchesAny(bpName, CLOSET_NAMES) and not matchesAny(bpName, KEY_NAMES) then
+			return nil
+		end
 	end
 
 	local name = lowerName(inst)
@@ -387,11 +392,22 @@ local function hidePromptHost(prompt)
 	for i = 1, #HIDE_WORDS do
 		if string.find(s, HIDE_WORDS[i], 1, true) then hit = true break end
 	end
+	if not hit then
+		for i = 1, #CLOSET_NAMES do
+			if string.find(s, CLOSET_NAMES[i], 1, true) then hit = true break end
+		end
+	end
 	if not hit then return nil end
 	local host = prompt.Parent
 	if not host or isOurEsp(host) then return nil end
+	if host:IsA("Attachment") and host.Parent and host.Parent:IsA("BasePart") then
+		host = host.Parent
+	end
 	if host:IsA("BasePart") then return host end
 	if host:IsA("Model") or host:IsA("Tool") then return host end
+	if host.Parent and (host.Parent:IsA("Model") or host.Parent:IsA("BasePart")) and not isOurEsp(host.Parent) then
+		return host.Parent
+	end
 	return nil
 end
 
@@ -411,8 +427,14 @@ local function readPromptHost(prompt)
 	if not hit then return nil end
 	local host = prompt.Parent
 	if not host or isOurEsp(host) or isEntryObject(host) then return nil end
+	if host:IsA("Attachment") and host.Parent and host.Parent:IsA("BasePart") then
+		host = host.Parent
+	end
 	if host:IsA("BasePart") then return host end
 	if host:IsA("Model") or host:IsA("Tool") then return host end
+	if host.Parent and (host.Parent:IsA("Model") or host.Parent:IsA("BasePart")) and not isOurEsp(host.Parent) then
+		return host.Parent
+	end
 	return nil
 end
 
@@ -979,12 +1001,13 @@ local function forceEntry(inst, kind, label)
 	Tracked[inst] = { kind = kind, target = target, part = part, boxSize = boxSizeOf(target, part), hl = hl, bb = bb, txt = txt, draw = nil, digits = digits, label = label, root = inst }
 end
 
--- Structural closet pass: Hide prompts AND Hide click detectors anywhere
--- in the hierarchy (hiding may not use ProximityPrompts at all).
+-- Structural closet pass: Hide prompts, Hide click detectors, and closet models/parts
 local function scanClosetHosts()
 	if not State.closets then return end
 	for _, inst in ipairs(workspace:GetDescendants()) do
-		if inst:IsA("ProximityPrompt") and not isOurEsp(inst) then
+		if isOurEsp(inst) then
+			-- skip
+		elseif inst:IsA("ProximityPrompt") then
 			local host = hidePromptHost(inst)
 			if host and not Tracked[host] and inWorkspace(host) then
 				local target, part = resolveTarget(host)
@@ -993,14 +1016,19 @@ local function scanClosetHosts()
 					Tracked[host] = { kind = "closet", target = target, part = part, boxSize = boxSizeOf(target, part), hl = hl, bb = bb, txt = txt, digits = nil, label = "CLOSET", root = host }
 				end
 			end
-		elseif inst:IsA("ClickDetector") and not isOurEsp(inst) then
+		elseif inst:IsA("ClickDetector") then
 			local host = inst.Parent
 			if typeof(host) == "Instance" and not Tracked[host] and inWorkspace(host)
 				and (host:IsA("BasePart") or host:IsA("Model") or host:IsA("Tool")) then
-				local hay = lowerName(inst) .. " " .. lowerName(host)
+				local hay = lowerName(inst) .. " " .. lowerName(host) .. " " .. (host.Parent and lowerName(host.Parent) or "")
 				if matchesAny(hay, HIDE_WORDS) or matchesAny(hay, CLOSET_NAMES) then
 					pcall(forceEntry, host, "closet", "CLOSET")
 				end
+			end
+		elseif (inst:IsA("Model") or inst:IsA("BasePart")) and not Tracked[inst] and inWorkspace(inst) then
+			local n = lowerName(inst)
+			if matchesAny(n, CLOSET_NAMES) and not isUnderPlayer(inst) and not isEntryObject(inst) then
+				pcall(forceEntry, inst, "closet", "CLOSET")
 			end
 		end
 	end
@@ -1328,15 +1356,40 @@ end
 -- game renders desaturated with boosted contrast while ESP marks pop.
 local function ensureShader()
 	if not State.shaderChams then return end
-	local cc = Lighting:FindFirstChild("UraniumShader")
-	if not (typeof(cc) == "Instance" and cc:IsA("ColorCorrectionEffect")) then
-		if typeof(cc) == "Instance" then pcall(function() cc:Destroy() end) end
-		local ok, fx = pcall(Instance.new, "ColorCorrectionEffect")
-		if not ok or not fx then return end
-		cc = fx
-		cc.Name = "UraniumShader"
-		pcall(function() cc.Parent = Lighting end)
+	local cc = nil
+	-- Find existing shader
+	pcall(function()
+		for _, child in ipairs(Lighting:GetChildren()) do
+			if child.Name == "UraniumShader" and child:IsA("ColorCorrectionEffect") then
+				cc = child
+				break
+			end
+		end
+	end)
+	-- Create if missing
+	if not cc then
+		local ok, fx = pcall(function()
+			local inst = Instance.new("ColorCorrectionEffect")
+			inst.Name = "UraniumShader"
+			inst.Parent = Lighting
+			return inst
+		end)
+		if ok and fx then
+			cc = fx
+		else
+			-- Fallback: try cloning an existing CCE
+			pcall(function()
+				local existing = Lighting:FindFirstChildOfClass("ColorCorrectionEffect")
+				if existing then
+					local clone = existing:Clone()
+					clone.Name = "UraniumShader"
+					clone.Parent = Lighting
+					cc = clone
+				end
+			end)
+		end
 	end
+	if not cc then return end
 	pcall(function()
 		cc.Saturation = State.shaderSat
 		cc.Contrast = State.shaderContrast
@@ -1348,8 +1401,11 @@ end
 local function applyShaderChams(on)
 	State.shaderChams = on
 	if not on then
-		local cc = Lighting:FindFirstChild("UraniumShader")
-		if cc then pcall(function() cc:Destroy() end) end
+		pcall(function()
+			for _, child in ipairs(Lighting:GetChildren()) do
+				if child.Name == "UraniumShader" then child:Destroy() end
+			end
+		end)
 		return
 	end
 	ensureShader()
@@ -1551,12 +1607,14 @@ end
 
 -- Fire one prompt: executor fast-path, then the prompt's own hold
 -- simulation (InputHoldBegin/End), else a real E-hold in range.
-local function firePrompt(prompt)
+local function firePrompt(prompt, fast)
 	if typeof(prompt) ~= "Instance" or not prompt:IsA("ProximityPrompt") then return end
 	if not prompt.Enabled then return end
 	if typeof(fireproximityprompt) == "function" then
 		pcall(fireproximityprompt, prompt)
-		task.wait((prompt.HoldDuration or 0) + 0.3)
+		if not fast then
+			task.wait((prompt.HoldDuration or 0) + 0.1)
+		end
 		return
 	end
 	local began = false
@@ -1565,12 +1623,12 @@ local function firePrompt(prompt)
 		began = true
 	end)
 	if began then
-		task.wait((prompt.HoldDuration or 0) + 0.2)
+		task.wait((prompt.HoldDuration or 0) + (fast and 0.05 or 0.2))
 		pcall(function() prompt:InputHoldEnd() end)
-		task.wait(0.3)
+		if not fast then task.wait(0.1) end
 		return
 	end
-	pressE((prompt.HoldDuration or 0) + 0.4)
+	pressE((prompt.HoldDuration or 0) + (fast and 0.15 or 0.3))
 end
 
 local function firePromptsIn(model)
@@ -1969,11 +2027,11 @@ local function acquireCode()
 	return getFoundCode() or readCodeNoteDirect()
 end
 
-local function enterCodeAtPanel(panel, code)
-	pressPanelDigits(panel, code)
-	task.wait(0.8)
+local function enterCodeAtPanel(panel, code, force)
+	pressPanelDigits(panel, code, force)
+	task.wait(0.5)
 	firePromptsIn(panel)
-	task.wait(0.8)
+	task.wait(0.5)
 end
 
 -- Click a 3D part through the screen (fallback when the executor has no
@@ -1987,7 +2045,7 @@ local function screenClickPart(part)
 	return vimClick(v.X, v.Y)
 end
 
-local function pressPanelDigits(panelModel, code)
+pressPanelDigits = function(panelModel, code, force)
 	-- Fast path: the real Keypad (Digit1-4, each with Readout + a "Digit"
 	-- child holding the ClickDetector). Click the right digit until its
 	-- Readout shows the wanted char, like the reference script does.
@@ -1995,7 +2053,7 @@ local function pressPanelDigits(panelModel, code)
 	if pad and typeof(fireclickdetector) == "function" then
 		local structural = true
 		for w = 1, #code do
-			if not State.autowin then return end
+			if not State.autowin and not force then return end
 			local want = string.sub(code, w, w)
 			local digitW = pad:FindFirstChild("Digit" .. w)
 			if not digitW then structural = false break end
@@ -2004,15 +2062,22 @@ local function pressPanelDigits(panelModel, code)
 				or digitW:FindFirstChildOfClass("ClickDetector", true)
 			local readout = digitW:FindFirstChild("Readout", true)
 			if not det then structural = false break end
-			for _ = 1, 20 do
-				if not State.autowin then return end
+			for _ = 1, 25 do
+				if not State.autowin and not force then return end
 				local shown = nil
-				if readout and (readout:IsA("TextLabel") or readout:IsA("TextButton")) then
-					pcall(function() shown = readout.Text end)
+				if readout then
+					if readout:IsA("TextLabel") or readout:IsA("TextButton") then
+						pcall(function() shown = readout.Text end)
+					else
+						local lbl = readout:FindFirstChildWhichIsA("TextLabel", true) or readout:FindFirstChildWhichIsA("TextButton", true)
+						if lbl then pcall(function() shown = lbl.Text end) end
+					end
 				end
-				if shown == want then break end
+				local shownDigit = shown and string.match(tostring(shown), "%d")
+				if shownDigit == want then break end
+				pcall(fireclickdetector, det, 0)
 				pcall(fireclickdetector, det)
-				task.wait(0.35)
+				task.wait(0.2)
 			end
 		end
 		if structural then return end
@@ -2023,10 +2088,11 @@ local function pressPanelDigits(panelModel, code)
 	if not panel then return end
 	local clicks, buttons = panelDigitControls(panel)
 	for i = 1, #code do
-		if not State.autowin then return end
+		if not State.autowin and not force then return end
 		local digit = string.sub(code, i, i)
 		local det = clicks[digit]
 		if det and typeof(fireclickdetector) == "function" then
+			pcall(fireclickdetector, det, 0)
 			pcall(fireclickdetector, det)
 		else
 			local dw = pad and pad:FindFirstChild("Digit" .. i) or nil
@@ -2042,7 +2108,7 @@ local function pressPanelDigits(panelModel, code)
 				end
 			end
 		end
-		task.wait(0.45)
+		task.wait(0.3)
 	end
 end
 
@@ -2056,23 +2122,25 @@ local function grabHiddenKey(hk, homeOverride)
 	local part = keyPartIn(hk)
 	if not prompt or not part then return false end
 	prepPrompt(prompt)
+	pcall(function() prompt.HoldDuration = 0 end)
 	local hrp = myHRP()
 	local home = homeOverride or ((hrp and hrp.CFrame) or nil)
-	for _ = 1, 4 do
+	for _ = 1, 3 do
 		if not State.autowin or not State.running then return false end
 		if not inWorkspace(hk) then return true end
 		waitRespawn()
 		if not State.autowin then return false end
 		hrp = myHRP()
 		if hrp and inWorkspace(part) then
-			pcall(function() hrp.CFrame = part.CFrame + Vector3.new(0, 1, 4) end)
-			task.wait(0.5)
+			pcall(function() hrp.CFrame = part.CFrame + Vector3.new(0, 1, 0) end)
+			task.wait(0.12)
 		end
 		if not State.autowin then return false end
-		firePrompt(prompt)
-		task.wait(0.6)
-		pressE(0.4)
-		task.wait(0.3)
+		prepPrompt(prompt)
+		pcall(function() prompt.HoldDuration = 0 end)
+		firePrompt(prompt, true)
+		pressE(0.15)
+		task.wait(0.2)
 		if not inWorkspace(hk) or countKeysHeld() > before then
 			hrp = myHRP()
 			if hrp and home then pcall(function() hrp.CFrame = home end) end
@@ -2086,7 +2154,7 @@ end
 
 local function grabKey(inst)
 	local before = countKeysHeld()
-	for attempt = 1, 4 do
+	for attempt = 1, 3 do
 		if not State.autowin or not State.running then return false end
 		if not inWorkspace(inst) then return true end
 		waitRespawn()
@@ -2094,16 +2162,12 @@ local function grabKey(inst)
 		local _, part = resolveTarget(inst)
 		local pos = part and part.Position or nil
 		if pos then
-			instantTP(pos + Vector3.new(0, State.collectDist, 0))
+			instantTP(pos + Vector3.new(0, 1, 0))
 		end
 		if not State.autowin then return false end
 		firePromptsIn(inst)
-		pressE(0.6)
-		local hrp = myHRP()
-		if hrp and part and inWorkspace(part) then
-			pcall(function() hrp.CFrame = part.CFrame + Vector3.new(0, 2, 0) end)
-		end
-		task.wait(0.35)
+		pressE(0.2)
+		task.wait(0.2)
 		if not inWorkspace(inst) or countKeysHeld() > before then return true end
 	end
 	return (not inWorkspace(inst)) or countKeysHeld() > before
@@ -2127,12 +2191,12 @@ local function autoWinLoop()
 				grabHiddenKey(hk, home)
 				setStatus("AUTO WIN 1/4: collecting keys (" .. countKeysHeld() .. "/" .. KEYS_NEEDED .. ")")
 			end
-			task.wait(0.15)
+			task.wait(0.1)
 		end
 		-- Leftovers the structural pass missed.
 		if State.autowin and State.running and countKeysHeld() < KEYS_NEEDED then
 			local guard = 0
-			while State.autowin and State.running and countKeysHeld() < KEYS_NEEDED and guard < 15 do
+			while State.autowin and State.running and countKeysHeld() < KEYS_NEEDED and guard < 10 do
 				guard = guard + 1
 				waitRespawn()
 				if not State.autowin then break end
@@ -2146,7 +2210,7 @@ local function autoWinLoop()
 				local h = myHRP()
 				if h and home then pcall(function() h.CFrame = home end) end
 				setStatus("AUTO WIN 1/4: collecting keys (" .. countKeysHeld() .. "/" .. KEYS_NEEDED .. ")")
-				task.wait(0.15)
+				task.wait(0.1)
 			end
 		end
 		if not State.autowin then break end
@@ -2163,13 +2227,13 @@ local function autoWinLoop()
 			local lp = lockPromptByName(lname)
 			if lp then
 				prepPrompt(lp)
+				pcall(function() lp.HoldDuration = 0 end)
 				local part = promptRootPart(lp)
-				if part then instantTP(part.Position + Vector3.new(0, 3, 0)) end
+				if part then instantTP(part.Position + Vector3.new(0, 1, 1)) end
 				if not State.autowin then break end
-				firePrompt(lp)
-				task.wait(0.3)
-				firePrompt(lp)
-				task.wait(0.25)
+				firePrompt(lp, true)
+				pressE(0.15)
+				task.wait(0.15)
 			end
 		end
 		for _, t in ipairs(scanLockPrompts(20)) do
@@ -2178,12 +2242,12 @@ local function autoWinLoop()
 			if not State.autowin then break end
 			equipKeyTool()
 			prepPrompt(t.prompt)
-			instantTP(t.pos + Vector3.new(0, 3, 0))
+			pcall(function() t.prompt.HoldDuration = 0 end)
+			instantTP(t.pos + Vector3.new(0, 1, 1))
 			if not State.autowin then break end
-			firePrompt(t.prompt)
-			task.wait(0.3)
-			firePrompt(t.prompt)
-			task.wait(0.25)
+			firePrompt(t.prompt, true)
+			pressE(0.15)
+			task.wait(0.15)
 		end
 		do
 			local h = myHRP()
@@ -2194,12 +2258,23 @@ local function autoWinLoop()
 		-- 3/4: read the code text.
 		setStatus("AUTO WIN 3/4: reading code")
 		notify("Auto Win", "Step 3/4: reading code", "eye")
+		-- Teleport directly near CodeNote so it's loaded and readable
+		do
+			local note = findCodeNote()
+			if note then
+				local _, notePart = resolveTarget(note)
+				if notePart then
+					instantTP(notePart.Position + Vector3.new(0, 1, 1))
+					task.wait(0.15)
+				end
+			end
+		end
 		local code = acquireCode()
 		do
 			local tries = 0
-			while (not code) and State.autowin and State.running and tries < 3 do
+			while (not code) and State.autowin and State.running and tries < 4 do
 				tries = tries + 1
-				setStatus("AUTO WIN 3/4: reading code (" .. tries .. "/3)")
+				setStatus("AUTO WIN 3/4: reading code (" .. tries .. "/4)")
 				for _, e in pairs(Tracked) do
 					if not State.autowin then break end
 					if e.kind == "code" and e.root and inWorkspace(e.root) then
@@ -2207,7 +2282,7 @@ local function autoWinLoop()
 					end
 				end
 				fireAllReadPrompts(20)
-				task.wait(0.8)
+				task.wait(0.4)
 				if not State.autowin then break end
 				code = scanPlayerGuiForCode() or getFoundCode() or readCodeNoteDirect()
 			end
@@ -2245,18 +2320,23 @@ local function autoWinLoop()
 			break
 		end
 		waitRespawn()
-		instantTP(panelPos + Vector3.new(0, 4, 0))
-		enterCodeAtPanel(panel, code)
+		instantTP(panelPos + Vector3.new(0, 1, 2))
+		task.wait(0.15)
+		enterCodeAtPanel(panel, code, true)
+		task.wait(0.2)
 		for i = 1, 3 do
 			if not State.autowin then break end
 			local ep = elevatorPrompt()
 			if ep then
 				prepPrompt(ep)
-				firePrompt(ep)
+				pcall(function() ep.HoldDuration = 0 end)
+				local epart = promptRootPart(ep)
+				if epart then instantTP(epart.Position + Vector3.new(0, 1, 1)) end
+				firePrompt(ep, true)
 			else
 				firePromptsIn(panel)
 			end
-			task.wait(0.6)
+			task.wait(0.3)
 		end
 		do
 			local h = myHRP()
@@ -2347,53 +2427,59 @@ local function fireKeyPromptsNear(pos, radius)
 	return fired
 end
 
--- Insta Collect: grab nearby keys the moment you walk into range (no TP,
--- no Auto Win needed). Goes straight for the HiddenKey container's real
--- KeyPrompt, then any key-like prompt within 8 studs of the key.
+-- Insta Collect: grab nearby keys the moment you walk into range.
+-- Checks HiddenKey folders and any tracked keys within pickup radius.
 local function instaCollectLoop()
-	local cool = {}
 	while State.instacollect and State.running do
 		local hrp = myHRP()
 		if hrp then
 			local origin = hrp.Position
-			local pressed = false
-			for inst, e in pairs(Tracked) do
+			local radius = State.collectRadius or 14
+			local grabbed = false
+
+			-- Direct check for HiddenKey1-4 folders
+			for i = 1, HIDDEN_KEYS_TOTAL do
 				if not State.instacollect then break end
-				if e.kind == "key" and e.part and inWorkspace(inst) then
-					if (e.part.Position - origin).Magnitude <= State.collectRadius then
-						local last = cool[inst] or 0
-						if os.clock() - last >= 0.8 then
-							cool[inst] = os.clock()
-							-- Direct: walk up to the HiddenKey container.
-							local node = e.root or inst
-							for i = 1, 4 do
-								if typeof(node) ~= "Instance" then break end
-								if string.find(lowerName(node), "hiddenkey", 1, true) then
-									local kp = keyPromptIn(node)
-									if kp then
-										prepPrompt(kp)
-										firePrompt(kp)
-										pressed = true
-									end
-									break
-								end
-								if node == workspace or node == game then break end
-								node = node.Parent
-							end
-							if fireKeyPromptsNear(e.part.Position, 8) then
-								pressed = true
-							end
+				local hk = hiddenKeyFolder(i)
+				if hk and inWorkspace(hk) then
+					local part = keyPartIn(hk)
+					if part and (part.Position - origin).Magnitude <= radius then
+						local kp = keyPromptIn(hk)
+						if kp and kp.Enabled then
+							prepPrompt(kp)
+							pcall(function() kp.HoldDuration = 0 end)
+							firePrompt(kp, true)
+							grabbed = true
 						end
 					end
 				end
 			end
-			if pressed then
-				pressE(0.3)
+
+			-- Check all tracked key objects
+			for inst, e in pairs(Tracked) do
+				if not State.instacollect then break end
+				if e.kind == "key" and e.part and inWorkspace(inst) then
+					if (e.part.Position - origin).Magnitude <= radius then
+						firePromptsIn(inst)
+						if e.root and e.root ~= inst then firePromptsIn(e.root) end
+						if fireKeyPromptsNear(e.part.Position, radius) then
+							grabbed = true
+						end
+					end
+				end
+			end
+
+			if grabbed then
+				pressE(0.1)
 			end
 		end
-		task.wait(0.15)
+		task.wait(0.04)
 	end
 end
+
+-- Forward declaration: pressPanelDigits is defined below enterCodeAtPanel
+-- but called from within it. Without this, it's nil at call time.
+local pressPanelDigits
 
 -- One-shot: read code + teleport to panel + type it.
 local function putCodeNow()
@@ -2441,15 +2527,13 @@ local function putCodeNow()
 			setStatus("PUT CODE: no character. Code: " .. code)
 			return
 		end
-		pcall(function() hrp.CFrame = CFrame.new(panelPos + Vector3.new(0, 4, 0)) end)
-		task.wait(0.3)
+		pcall(function() hrp.CFrame = CFrame.new(panelPos + Vector3.new(0, 1, 2)) end)
+		task.wait(0.15)
+		faceTowards(panelPos)
 		setStatus("PUT CODE: entering " .. code)
 		notify("Put Code", "Entering " .. code, "hash")
-		-- Temporarily allow digit pressing outside autowin
-		State.autowin = true
-		pressPanelDigits(panel, code)
-		State.autowin = false
-		task.wait(0.6)
+		pressPanelDigits(panel, code, true)
+		task.wait(0.3)
 		firePromptsIn(panel)
 		setStatus("PUT CODE done: " .. code)
 		notify("Put Code done", "Code: " .. code, "check")
@@ -2841,41 +2925,125 @@ local function visitLoop()
 	end
 end
 
+local function getMonsterPart()
+	local ver = workspace:FindFirstChild("VER") or workspace:FindFirstChild("ver")
+	if not ver then
+		for inst, e in pairs(Tracked) do
+			if e.kind == "monster" and e.part and inWorkspace(inst) then
+				return e.part
+			end
+		end
+	end
+	if ver then
+		local _, part = resolveTarget(ver)
+		if part then return part end
+		if ver:IsA("BasePart") then return ver end
+		return ver:FindFirstChildWhichIsA("BasePart", true)
+	end
+	return nil
+end
+
+local function tpPlayerToMonster(target)
+	local mPart = getMonsterPart()
+	if not mPart then
+		notify("Troll", "Monster (VER) not found", "alert")
+		return false
+	end
+	if target and target.Character and target.Character:FindFirstChild("HumanoidRootPart") then
+		pcall(function()
+			target.Character.HumanoidRootPart.CFrame = mPart.CFrame + Vector3.new(0, 1, 0)
+		end)
+		return true
+	end
+	return false
+end
+
+local function tpAllPlayersToMonster()
+	local mPart = getMonsterPart()
+	if not mPart then
+		notify("Troll", "Monster (VER) not found", "alert")
+		return
+	end
+	local count = 0
+	for _, plr in ipairs(Players:GetPlayers()) do
+		if plr ~= LocalPlayer and plr.Character and plr.Character:FindFirstChild("HumanoidRootPart") then
+			pcall(function()
+				plr.Character.HumanoidRootPart.CFrame = mPart.CFrame + Vector3.new(0, 1, 0)
+			end)
+			count = count + 1
+		end
+	end
+	if count > 0 then
+		notify("Troll", "Teleported " .. count .. " player(s) to monster!", "skull")
+	else
+		notify("Troll", "No other players found", "info")
+	end
+end
+
+local function loopTpPlayersToMonster()
+	while State.loopTpToMonster and State.running do
+		local mPart = getMonsterPart()
+		if mPart then
+			for _, plr in ipairs(Players:GetPlayers()) do
+				if plr ~= LocalPlayer and plr.Character and plr.Character:FindFirstChild("HumanoidRootPart") then
+					pcall(function()
+						plr.Character.HumanoidRootPart.CFrame = mPart.CFrame + Vector3.new(0, 1, 0)
+					end)
+				end
+			end
+		end
+		task.wait(0.25)
+	end
+end
+
 -- ===================== TROLL TAB =====================
 
 local function buildTrollTab()
 	local trollTab = Window:Tab({ Name = "Trolling", Icon = "skull" })
 	local trollMain = trollTab:SubTab({ Name = "Main", Icon = "user" })
 	
-	local trollSec = trollMain:Section({ Name = "Players", Side = 1 })
-	UiRefs.playerEspTgl = trollSec:Toggle({
-		Name = "Player ESP", Default = State.playerEsp, Flag = "ura_playeresp",
-		Callback = function(v)
-			State.playerEsp = v
-			if v then fullScan() else clearKind("player") end
+	local trollSec = trollMain:Section({ Name = "Kill & Monster", Side = 1 })
+	trollSec:Button({
+		Name = "TP All Players to Monster (Kill All)",
+		Callback = function()
+			tpAllPlayersToMonster()
 		end,
 	})
-	trollSec:Colorpicker({
-		Name = "Player color", Default = State.colPlayer, Flag = "ura_colplayer",
+	trollSec:Button({
+		Name = "TP Random Player to Monster (Kill)",
+		Callback = function()
+			local others = {}
+			for _, plr in ipairs(Players:GetPlayers()) do
+				if plr ~= LocalPlayer and plr.Character and plr.Character:FindFirstChild("HumanoidRootPart") then
+					others[#others + 1] = plr
+				end
+			end
+			if #others == 0 then
+				notify("Troll", "No other players found", "info")
+				return
+			end
+			local target = others[math.random(#others)]
+			if tpPlayerToMonster(target) then
+				notify("Troll", "Teleported " .. target.Name .. " to monster!", "skull")
+			end
+		end,
+	})
+	trollSec:Toggle({
+		Name = "Loop TP Players to Monster", Default = State.loopTpToMonster, Flag = "ura_loopkill",
 		Callback = function(v)
-			State.colPlayer = v
-			applyKindColors("player")
+			State.loopTpToMonster = v
+			if v then task.spawn(loopTpPlayersToMonster) end
 		end,
 	})
 	trollSec:Button({
 		Name = "TP to Monster (VER)",
 		Callback = function()
-			local ver = workspace:FindFirstChild("VER")
-			if ver then
-				local _, part = resolveTarget(ver)
-				if part then
-					local hrp = myHRP()
-					if hrp then
-						pcall(function() hrp.CFrame = part.CFrame + Vector3.new(0, 3, 0) end)
-						notify("Troll", "Teleported to monster", "skull")
-					end
-				else
-					notify("Troll", "Monster found but no part to TP to", "alert")
+			local mPart = getMonsterPart()
+			if mPart then
+				local hrp = myHRP()
+				if hrp then
+					pcall(function() hrp.CFrame = mPart.CFrame + Vector3.new(0, 3, 0) end)
+					notify("Troll", "Teleported to monster", "skull")
 				end
 			else
 				notify("Troll", "VER not found in workspace", "alert")
@@ -2885,32 +3053,69 @@ local function buildTrollTab()
 	trollSec:Button({
 		Name = "TP Monster to Me",
 		Callback = function()
-			local ver = workspace:FindFirstChild("VER")
+			local mPart = getMonsterPart()
 			local hrp = myHRP()
-			if ver and hrp then
-				local _, part = resolveTarget(ver)
-				if part then
-					pcall(function() part.CFrame = hrp.CFrame + Vector3.new(5, 0, 0) end)
-					notify("Troll", "Monster teleported to you", "skull")
-				end
+			if mPart and hrp then
+				pcall(function() mPart.CFrame = hrp.CFrame + Vector3.new(5, 0, 0) end)
+				notify("Troll", "Monster teleported to you", "skull")
 			else
 				notify("Troll", "VER or you not found", "alert")
 			end
 		end,
 	})
-	trollSec:Toggle({
+	
+	local plrSec = trollMain:Section({ Name = "Players", Side = 2 })
+	UiRefs.playerEspTgl = plrSec:Toggle({
+		Name = "Player ESP", Default = State.playerEsp, Flag = "ura_playeresp",
+		Callback = function(v)
+			State.playerEsp = v
+			if v then fullScan() else clearKind("player") end
+		end,
+	})
+	plrSec:Colorpicker({
+		Name = "Player color", Default = State.colPlayer, Flag = "ura_colplayer",
+		Callback = function(v)
+			State.colPlayer = v
+			applyKindColors("player")
+		end,
+	})
+	plrSec:Toggle({
 		Name = "Visit loop (TP to each player)", Default = State.visit, Flag = "ura_visit",
 		Callback = function(v)
 			State.visit = v
 			if v then task.spawn(visitLoop) end
 		end,
 	})
-	trollSec:Slider({
+	plrSec:Slider({
 		Name = "Visit delay", Min = 1, Max = 10, Default = 3, Suffix = "s", Flag = "ura_visitdelay",
 		Callback = function(v) State.visitDelay = v end,
 	})
 	
 	local baitSec = trollMain:Section({ Name = "Bait", Side = 2 })
+	baitSec:Button({
+		Name = "TP Monster to All Players",
+		Callback = function()
+			local mPart = getMonsterPart()
+			if not mPart then
+				notify("Troll", "Monster not found", "alert")
+				return
+			end
+			local count = 0
+			for _, plr in ipairs(Players:GetPlayers()) do
+				if plr ~= LocalPlayer and plr.Character and plr.Character:FindFirstChild("HumanoidRootPart") then
+					pcall(function()
+						mPart.CFrame = plr.Character.HumanoidRootPart.CFrame
+					end)
+					count = count + 1
+				end
+			end
+			if count > 0 then
+				notify("Troll", "Monster teleported to players!", "skull")
+			else
+				notify("Troll", "No other players found", "info")
+			end
+		end,
+	})
 	baitSec:Button({
 		Name = "Bait TP (random player to you)",
 		Callback = function()
@@ -2926,7 +3131,7 @@ local function buildTrollTab()
 			end
 			local target = others[math.random(#others)]
 			local hrp = myHRP()
-			if hrp and target.Character then
+			if hrp and target.Character and target.Character:FindFirstChild("HumanoidRootPart") then
 				pcall(function() target.Character.HumanoidRootPart.CFrame = hrp.CFrame + Vector3.new(3, 0, 0) end)
 				notify("Bait", "Teleported " .. target.Name .. " to you", "user")
 			end
@@ -2947,7 +3152,7 @@ local function buildTrollTab()
 			end
 			local target = others[math.random(#others)]
 			local hrp = myHRP()
-			if hrp and target.Character then
+			if hrp and target.Character and target.Character:FindFirstChild("HumanoidRootPart") then
 				pcall(function() hrp.CFrame = target.Character.HumanoidRootPart.CFrame + Vector3.new(3, 0, 0) end)
 				notify("Bait", "Teleported you to " .. target.Name, "user")
 			end
@@ -3099,12 +3304,20 @@ trackConnection(RunService.Heartbeat:Connect(function(dt)
 		end
 	end
 	flyStep()
-	if State.fullbright or State.shaderChams then
+	if State.fullbright or State.shaderChams or State.matChams then
 		accFb = accFb + dt
 		if accFb >= 1 then
 			accFb = 0
 			if State.fullbright then enforceFullbright() end
 			if State.shaderChams then ensureShader() end
+			-- Re-enforce material chams: the game may reset part properties
+			if State.matChams then
+				for _, e in pairs(Tracked) do
+					if e.target and isKindEnabled(e.kind) then
+						applyChamToTarget(e.target, kindColor(e.kind))
+					end
+				end
+			end
 		end
 	end
 	-- ESP refresh timers
@@ -3217,6 +3430,7 @@ function Api.Unload()
 	State.autowin = false
 	State.autokeys = false
 	State.instacollect = false
+	State.loopTpToMonster = false
 	State.fly = false
 	State.noclip = false
 	State.fullbright = false

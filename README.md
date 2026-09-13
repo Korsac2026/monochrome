@@ -54,38 +54,27 @@ Menu key: **RightShift**. In first person press **M** (game's own key) to free t
 - Interaction: Instant Interact (all E prompts complete with zero hold)
 
 **Auto**
-- Auto Win (instant teleport): 1 clears the boarded entrance, 2 opens drawers
-  (keys hide inside), 3 grabs HiddenKey1-4 via their real `KeyPrompt`s
-  (position save/restore, inventory-count verified), 4 fires the `Cube.*`
-  door-lock prompts, 5 hunts the code (up to 3 rounds of note reading),
-  enters it on the real `Keypad` (clicks each `Digit` until its `Readout`
-  matches, max 20 tries per digit; screen-click fallback when the executor
-  has no `fireclickdetector`) and fires the `Cylinder.002` elevator prompt
-  3 times. Before every door, a key Tool is equipped (doors validate the
-  held key). Lock phases run structural Cube prompts, then any `*lock*`
-  prompt, then the generic deadbolt scan. Generic name scans remain as
-  fallback for every phase.
-- Prompts are loosened before firing (`RequiresLineOfSight = false`,
-  `MaxActivationDistance = 5000`) and fired via `fireproximityprompt` →
-  `InputHoldBegin/End` → real E-key fallback.
-- Auto Use Keys: passive loop, spends held keys on nearby exits (no teleport).
-- Put Code Now: one-shot code entry at the panel (prefers the real Keypad).
-- View Code: hunts the code remotely (Read prompts fire at any distance),
-  shows it in a notification + status and copies it to the clipboard —
-  no need to walk to the note.
-- Insta Collect: passive pickup — walk within the pickup radius of a key and
-  it fires its prompt automatically (2s cooldown per key, no teleport).
-- Collect distance slider (stand-off range when grabbing).
-- Pickup radius slider (Insta Collect range).
-- Live status label.
+- Auto Win (instant teleport): streamlined sequence —
+  1 Teleports to HiddenKey1-4, grabs them with zero hold time and returns,
+  2 Teleports to door locks (Cube.028, Cube.035, Cube.031, Cube.033), equips key and unlocks them,
+  3 Teleports near CodeNote, reads the code directly from Printed > Digits,
+  4 Teleports in front of the Keypad, enters the code digits with ClickDetector,
+  5 Activates the elevator prompt to finish the game automatically.
+- Put Code Now: one-shot code entry at the Keypad with direct positioning and forced execution.
+- View Code: shows the code + copies it to clipboard immediately.
+- Insta Collect: ultra-fast proximity pickup (0.04s tick, zero hold duration, scans HiddenKey1-4 and all key prompts within radius).
 
 **Trolling**
+- TP All Players to Monster (Kill All): teleports all other players on the server right onto the monster so they die.
+- TP Random Player to Monster (Kill): teleports a random player directly to the monster.
+- Loop TP Players to Monster: continuous loop teleporting all players onto the monster's hitbox.
+- TP Monster to All Players: pulls the monster directly onto other players.
 - Player ESP: marks other players with name + distance.
 - TP to Monster (VER): teleports you to the monster.
-- TP Monster to Me: pulls the monster to you (fun for killing it or trapping it).
-- Visit loop: auto-teleports you to a random player every N seconds.
-- Bait TP (random player to you): yanks a random player to your position.
-- Bait TP (you to random player): teleports you to a random player.
+- TP Monster to Me: pulls the monster to you.
+- Visit loop: auto-teleports you to each player every N seconds.
+- Bait TP (random player to you): brings a player to your position.
+- Bait TP (you to random player): teleports you to a player.
 
 On every load the script shows the Discord invite and copies it to the
 clipboard (`DISCORD_INVITE` at the top of the script — set your real link).
