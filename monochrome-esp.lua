@@ -69,12 +69,17 @@ local HasDrawing = typeof(Drawing) == "table"
 
 local TARGET_PLACE = 134208374070897
 local KEYS_NEEDED = 4
+-- Discord server: shown + copied to clipboard every time the script loads.
+-- TODO: replace with the real invite code.
+local DISCORD_INVITE = "https://discord.gg/TU-CODIGO"
 
 -- Monochrome palette (ESP defaults)
 local WHITE = Color3.new(1, 1, 1)
 local BLACK = Color3.new(0, 0, 0)
 
--- Our own ESP object names (never scan/mark these or we loop on ourselves)
+-- Our own ESP object names (never scan/mark these or we loop on ourselves).
+-- Also covers the other MONOCHROME script's ESP (ESP_Label / HiddenKeyESP /
+-- VER_ESP / PlayerESP): running both at once would double every mark.
 local OWN_NAMES = {
 	["UraniumESP"] = true,
 	["Uranium_HL"] = true,
@@ -82,6 +87,11 @@ local OWN_NAMES = {
 	["MonoESP"] = true,
 	["MonoESP_HL"] = true,
 	["MonoESP_BB"] = true,
+	["ESP_Label"] = true,
+	["HiddenKeyESP"] = true,
+	["VER_ESP"] = true,
+	["PlayerESP"] = true,
+	["PlayerESP_Label"] = true,
 }
 
 local function isOurEsp(inst)
@@ -456,7 +466,7 @@ local function makeEspObjects(target, part)
 	txt.Name = "Label"
 	txt.BackgroundTransparency = 1
 	txt.Size = UDim2.new(1, 0, 1, 0)
-	txt.Font = Enum.Font.GothamBold
+	txt.Font = Enum.Font.GothamBlack
 	txt.TextSize = State.textSize
 	txt.TextColor3 = col
 	txt.TextStrokeTransparency = 0
@@ -485,7 +495,7 @@ local function ensureDraw(e)
 	t.Visible = false
 	t.Center = true
 	t.Outline = true
-	t.Font = 2
+	t.Font = 3 -- monospace: digits/distances stay aligned
 	d.txt = t
 	e.draw = d
 end
@@ -564,12 +574,18 @@ local function drawEntry(e, origin)
 		d.snap.Visible = false
 	end
 	if showBox then
-		local title = e.kind == "code" and (e.digits and ("CODE " .. e.digits) or "NOTE") or kindTitle(e.kind)
-		d.txt.Color = col
-		d.txt.Size = State.textSize
-		d.txt.Text = title .. "  " .. tostring(math.floor(dist)) .. "m"
-		d.txt.Position = Vector2.new(cx, ty - State.textSize - 6)
-		d.txt.Visible = true
+		-- Drawing text only when billboard labels are OFF: otherwise the
+		-- name + distance shows twice (this was the "double name" bug).
+		if State.labels then
+			d.txt.Visible = false
+		else
+			local title = e.kind == "code" and (e.digits and ("CODE " .. e.digits) or "NOTE") or kindTitle(e.kind)
+			d.txt.Color = col
+			d.txt.Size = State.textSize
+			d.txt.Text = title .. "  " .. tostring(math.floor(dist)) .. "m"
+			d.txt.Position = Vector2.new(cx, ty - State.textSize - 6)
+			d.txt.Visible = true
+		end
 	else
 		d.txt.Visible = false
 	end
@@ -788,6 +804,15 @@ local function addEntry(inst)
 	local kind, label = classify(inst)
 	if not kind then return end
 	if not isKindEnabled(kind) then return end
+	-- One monster only (this game has a single VER): extra humanoids/models
+	-- with monster-ish names would duplicate the mark. NPC-scan mode keeps all.
+	if kind == "monster" and not State.npcScan then
+		for other, e in pairs(Tracked) do
+			if other ~= inst and e.kind == "monster" and inWorkspace(other) then
+				return
+			end
+		end
+	end
 	local target, part = resolveTarget(inst)
 	if not target or not part then
 		-- No parts yet (streaming): keep pending, resolved in the loop
@@ -943,6 +968,11 @@ local function updateEntry(e, origin, maxDist, refreshDigits)
 		else
 			return true -- still pending
 		end
+	end
+	-- Drawing objects are created lazily here: without this call boxes and
+	-- snaplines never render (this was the "boxes don't work" bug).
+	if HasDrawing and (State.boxes or State.tracers) then
+		ensureDraw(e)
 	end
 	if e.kind == "code" and refreshDigits then
 		if not refreshCodeDigits(e) then
@@ -1645,6 +1675,17 @@ local function enterCodeAtPanel(panel, code)
 	task.wait(0.8)
 end
 
+-- Click a 3D part through the screen (fallback when the executor has no
+-- fireclickdetector): face it, project to viewport, real mouse click.
+local function screenClickPart(part)
+	if not VIM or not Camera then return false end
+	if typeof(part) ~= "Instance" or not part:IsA("BasePart") then return false end
+	faceTowards(part.Position)
+	local v, onScreen = Camera:WorldToViewportPoint(part.Position)
+	if not onScreen then return false end
+	return vimClick(v.X, v.Y)
+end
+
 local function pressPanelDigits(panelModel, code)
 	-- Fast path: the real Keypad (Digit1-4, each with Readout + a "Digit"
 	-- child holding the ClickDetector). Click the right digit until its
@@ -1675,7 +1716,8 @@ local function pressPanelDigits(panelModel, code)
 		end
 		if structural then return end
 	end
-	-- Generic fallback: single-shot ClickDetectors / VIM screen buttons.
+	-- Generic fallback: single-shot ClickDetectors, digit-part screen
+	-- clicks on the real Keypad, or VIM clicks on digit buttons.
 	local panel = panelModel or pad
 	if not panel then return end
 	local clicks, buttons = panelDigitControls(panel)
@@ -1686,11 +1728,17 @@ local function pressPanelDigits(panelModel, code)
 		if det and typeof(fireclickdetector) == "function" then
 			pcall(fireclickdetector, det)
 		else
-			local btn = buttons[digit]
-			if btn then
-				local bp = promptRootPart(btn) or myHRP()
-				if bp then faceTowards(bp.Position) end
-				clickButtonAt(btn)
+			local dw = pad and pad:FindFirstChild("Digit" .. i) or nil
+			local dp = dw and (dw:IsA("BasePart") and dw or dw:FindFirstChildWhichIsA("BasePart", true)) or nil
+			if dp then
+				screenClickPart(dp)
+			else
+				local btn = buttons[digit]
+				if btn then
+					local bp = promptRootPart(btn) or myHRP()
+					if bp then faceTowards(bp.Position) end
+					clickButtonAt(btn)
+				end
 			end
 		end
 		task.wait(0.45)
@@ -1869,8 +1917,26 @@ local function autoWinLoop()
 		end
 		if not State.autowin then break end
 
-		-- Phase 4: elevator panel + code (structural Keypad + Elevator first)
+		-- Phase 4: elevator panel + code (structural Keypad + Elevator first).
+		-- Retries the code hunt: notes may need their Read prompts fired
+		-- before the digits show up in the UI.
 		local code = acquireCode()
+		do
+			local tries = 0
+			while (not code) and State.autowin and State.running and tries < 3 do
+				tries = tries + 1
+				setStatus("AUTO WIN 5/5: finding code (" .. tries .. "/3)")
+				for _, e in pairs(Tracked) do
+					if not State.autowin then break end
+					if e.kind == "code" and e.root and inWorkspace(e.root) then
+						firePromptsIn(e.root)
+					end
+				end
+				task.wait(0.8)
+				if not State.autowin then break end
+				code = scanPlayerGuiForCode() or getFoundCode() or readCodeNoteDirect()
+			end
+		end
 		local panel, panelPos = nil, nil
 		do
 			local pad = keypadModel()
@@ -1890,12 +1956,17 @@ local function autoWinLoop()
 				notify("Auto Win", "Entering code " .. code, "hash")
 				enterCodeAtPanel(panel, code)
 			end
-			local ep = elevatorPrompt()
-			if ep then
-				prepPrompt(ep)
-				firePrompt(ep)
-				task.wait(0.4)
-				firePrompt(ep)
+			-- Elevator prompt: fired several times so the ride registers.
+			for i = 1, 3 do
+				if not State.autowin then break end
+				local ep = elevatorPrompt()
+				if ep then
+					prepPrompt(ep)
+					firePrompt(ep)
+				else
+					firePromptsIn(panel)
+				end
+				task.wait(0.6)
 			end
 			task.wait(0.8)
 		end
@@ -2264,6 +2335,17 @@ local function buildGui()
 		end,
 	})
 	miscSec:Button({
+		Name = "Copy Discord invite",
+		Callback = function()
+			pcall(function()
+				if typeof(setclipboard) == "function" then
+					setclipboard(DISCORD_INVITE)
+				end
+			end)
+			notify("Discord", DISCORD_INVITE .. " — copied", "message-circle")
+		end,
+	})
+	miscSec:Button({
 		Name = "Unload script",
 		Callback = function()
 			if getgenv and getgenv().UraniumMono and getgenv().UraniumMono.Unload then
@@ -2407,6 +2489,11 @@ trackConnection(RunService.Heartbeat:Connect(function(dt)
 	if hum and hum.WalkSpeed ~= State.speed then
 		applySpeed()
 	end
+	-- Infinite Lives frame-pin: if the server replicates damage faster than
+	-- the HealthChanged signal fires, this clamps it back every frame.
+	if State.godmode and hum and hum.Parent and hum.Health < hum.MaxHealth then
+		pcall(function() hum.Health = hum.MaxHealth end)
+	end
 	if State.noclip then
 		local char = myCharacter()
 		if char then
@@ -2492,6 +2579,14 @@ if game.PlaceId ~= TARGET_PLACE then
 else
 	notify("URANIUM loaded", "Press RightShift for the menu", "check")
 end
+
+-- Discord invite on load (copied to clipboard so joining is one paste away).
+pcall(function()
+	if typeof(setclipboard) == "function" then
+		setclipboard(DISCORD_INVITE)
+	end
+end)
+notify("Join our Discord", DISCORD_INVITE .. " — invite copied to clipboard", "message-circle")
 
 local Api = {}
 Api.Window = Window

@@ -27,16 +27,24 @@ Menu key: **RightShift**. In first person press **M** (game's own key) to free t
   and "hide" prompts.
 - Style: chams (outline), 2D corner boxes, snaplines, labels, max distance,
   text size. Boxes/snaplines need the Drawing API; they auto-disable with a
-  notice when the executor lacks it.
+  notice when the executor lacks it. Fonts: GothamBlack billboards,
+  monospace Drawing text. The Drawing text hides while billboard labels are
+  on (otherwise the name shows twice).
+- Do NOT run other MONOCHROME scripts at the same time: their ESP
+  (`ESP_Label`, `VER_ESP`, `HiddenKeyESP`, `PlayerESP`) duplicates every mark.
+  Our scanner ignores those objects, and only one monster entry is kept
+  (disable with NPC scan if you ever want multiples).
 
 **Movement**
 - Noclip (hotkey **N**), Fly (hotkey **V**, WASD + Space up / LeftShift down),
   Walk speed slider, Fly speed slider
-- Survival: **Infinite Lives** — pins Humanoid health to max and locks any
-  life/vida counter to 999. Fully effective when the game trusts the client
-  (no server-side exploit exists in the readable game code: the reference
-  script only uses prompts/click detectors, which the server validates);
-  otherwise combine with Noclip/Fly.
+- Survival: **Infinite Lives** — pins Humanoid health to max (signal +
+  every-frame clamp) and locks any life/vida counter to 999, re-armed on
+  respawn. Investigated the reference script for a lives "CVE": it contains
+  no lives/death/health logic at all — deaths are handled server-side with
+  no client-visible check or vulnerable remote, so no client exploit exists.
+  Fully effective when the game trusts the client; otherwise combine with
+  Noclip/Fly.
 - World: Fullbright, TP Spawn
 - Interaction: Instant Interact (all E prompts complete with zero hold)
 
@@ -44,10 +52,11 @@ Menu key: **RightShift**. In first person press **M** (game's own key) to free t
 - Auto Win (instant teleport): 1 clears the boarded entrance, 2 opens drawers
   (keys hide inside), 3 grabs HiddenKey1-4 via their real `KeyPrompt`s
   (position save/restore, inventory-count verified), 4 fires the `Cube.*`
-  door-lock prompts, 5 reads `CodeNote > Printed > Digits`, enters it on the
-  real `Keypad` (clicks each `Digit` until its `Readout` matches, max 20
-  tries per digit) and fires the `Cylinder.002` elevator prompt. Generic name
-  scans remain as fallback for every phase.
+  door-lock prompts, 5 hunts the code (up to 3 rounds of note reading),
+  enters it on the real `Keypad` (clicks each `Digit` until its `Readout`
+  matches, max 20 tries per digit; screen-click fallback when the executor
+  has no `fireclickdetector`) and fires the `Cylinder.002` elevator prompt
+  3 times. Generic name scans remain as fallback for every phase.
 - Prompts are loosened before firing (`RequiresLineOfSight = false`,
   `MaxActivationDistance = 5000`) and fired via `fireproximityprompt` →
   `InputHoldBegin/End` → real E-key fallback.
@@ -57,7 +66,11 @@ Menu key: **RightShift**. In first person press **M** (game's own key) to free t
 - Live status label.
 
 **Settings**
-- Theme config (built-in), rescan world button, unload button, help.
+- Theme config (built-in), rescan world button, copy-Discord button, unload
+  button, help.
+
+On every load the script shows the Discord invite and copies it to the
+clipboard (`DISCORD_INVITE` at the top of the script — set your real link).
 
 The status bar shows `monster:N  key:N  code:N  hide:N  code:XXXX  keys:H/4`.
 
