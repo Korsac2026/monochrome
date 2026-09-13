@@ -65,7 +65,16 @@ local LocalPlayer = Players.LocalPlayer
 local Camera = workspace.CurrentCamera
 local VIM = nil
 pcall(function() VIM = game:GetService("VirtualInputManager") end)
-local HasDrawing = typeof(Drawing) == "table"
+local HasDrawing = false
+pcall(function()
+	if Drawing and typeof(Drawing.new) == "function" then
+		local test = Drawing.new("Line")
+		if test then
+			HasDrawing = true
+			test:Remove()
+		end
+	end
+end)
 
 local TARGET_PLACE = 134208374070897
 local KEYS_NEEDED = 4
@@ -184,12 +193,9 @@ local State = {
 	boxes = true, -- 2D corner boxes (needs Drawing)
 	tracers = true, -- snaplines (needs Drawing)
 	labels = true, -- name/distance billboards
-	matChams = false, -- ForceField material overlay on every mark
-	chamTransp = 0.4, -- material cham transparency
+	matChams = false, -- 3D Box Adornment + Highlight Fill
+	chamTransp = 0.35, -- material cham transparency
 	chamFlat = true, -- tint chammed parts with the kind color
-	shaderChams = false, -- fullscreen monochrome shader (ColorCorrection)
-	shaderSat = -1, -- shader saturation (-1 = full monochrome)
-	shaderContrast = 0.2, -- shader contrast boost
 	noclip = false,
 	fly = false,
 	instacollect = false, -- grab keys the moment you walk into range
@@ -213,11 +219,6 @@ local State = {
 	colCloset = WHITE,
 	colPlayer = WHITE,
 }
-
-if not HasDrawing then
-	State.boxes = false
-	State.tracers = false
-end
 
 local Tracked = {} -- [instance] = {kind, target, part, boxSize, hl, bb, txt, draw, digits, label, root}
 local Connections = {}
@@ -475,80 +476,175 @@ local function boxSizeOf(target, part)
 end
 
 local EspFolder = nil
+local DrawScreenGui = nil
+
+local function getSafeUiParent()
+	local ok, parent = pcall(function()
+		if gethui then return gethui() end
+		return game:GetService("CoreGui")
+	end)
+	if ok and parent then return parent end
+	return (LocalPlayer and LocalPlayer:FindFirstChildOfClass("PlayerGui")) or workspace
+end
+
+local function initEspHolders()
+	if not EspFolder or not EspFolder.Parent then
+		EspFolder = Instance.new("Folder")
+		EspFolder.Name = "UraniumESP"
+		EspFolder.Parent = getSafeUiParent()
+	end
+	if not DrawScreenGui or not DrawScreenGui.Parent then
+		DrawScreenGui = Instance.new("ScreenGui")
+		DrawScreenGui.Name = "UraniumDraw"
+		DrawScreenGui.ResetOnSpawn = false
+		DrawScreenGui.DisplayOrder = 999
+		DrawScreenGui.Parent = getSafeUiParent()
+	end
+end
+initEspHolders()
 
 local function makeEspObjects(target, part)
+	initEspHolders()
 	local col = WHITE
+
+	-- 1. Highlight (Chams Outline + Fill)
 	local hl = Instance.new("Highlight")
 	hl.Name = "Uranium_HL"
 	hl.Adornee = target
-	hl.FillTransparency = 1
-	hl.OutlineTransparency = 0
+	hl.FillColor = col
+	hl.FillTransparency = State.matChams and State.chamTransp or 1
 	hl.OutlineColor = col
+	hl.OutlineTransparency = 0
 	hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
 	hl.Enabled = State.chams
 	hl.Parent = EspFolder
 
+	-- 2. Material Chams 3D Box Adornment (Solid through-walls glow)
+	local box = Instance.new("BoxHandleAdornment")
+	box.Name = "Uranium_Box"
+	box.Adornee = part
+	box.AlwaysOnTop = true
+	box.ZIndex = 5
+	box.Size = (part and part.Size or Vector3.new(3, 5, 3)) + Vector3.new(0.04, 0.04, 0.04)
+	box.Color3 = col
+	box.Transparency = State.chamTransp
+	box.Visible = State.matChams
+	box.Parent = EspFolder
+
+	-- 3. Modern Sleek Billboard Badge
 	local bb = Instance.new("BillboardGui")
 	bb.Name = "Uranium_BB"
 	bb.Adornee = part
 	bb.AlwaysOnTop = true
-	bb.Size = UDim2.new(0, 220, 0, 44)
-	bb.StudsOffset = Vector3.new(0, 3, 0)
+	bb.Size = UDim2.new(0, 140, 0, 28)
+	bb.StudsOffset = Vector3.new(0, 3.2, 0)
 	bb.Enabled = State.labels
 	bb.Parent = EspFolder
+
+	local bg = Instance.new("Frame")
+	bg.Name = "Badge"
+	bg.BackgroundColor3 = Color3.fromRGB(15, 15, 18)
+	bg.BackgroundTransparency = 0.25
+	bg.Size = UDim2.new(1, 0, 1, 0)
+	bg.BorderSizePixel = 0
+	bg.Parent = bb
+
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, 6)
+	corner.Parent = bg
+
+	local stroke = Instance.new("UIStroke")
+	stroke.Name = "Border"
+	stroke.Color = col
+	stroke.Thickness = 1.2
+	stroke.Transparency = 0.2
+	stroke.Parent = bg
+
+	local dot = Instance.new("Frame")
+	dot.Name = "Dot"
+	dot.BackgroundColor3 = col
+	dot.Position = UDim2.new(0, 7, 0.5, -4)
+	dot.Size = UDim2.new(0, 8, 0, 8)
+	dot.BorderSizePixel = 0
+	dot.Parent = bg
+
+	local dotCorner = Instance.new("UICorner")
+	dotCorner.CornerRadius = UDim.new(1, 0)
+	dotCorner.Parent = dot
 
 	local txt = Instance.new("TextLabel")
 	txt.Name = "Label"
 	txt.BackgroundTransparency = 1
-	txt.Size = UDim2.new(1, 0, 1, 0)
-	txt.Font = Enum.Font.GothamBlack
-	txt.TextSize = State.textSize
-	txt.TextColor3 = col
-	txt.TextStrokeTransparency = 0
-	txt.TextStrokeColor3 = BLACK
+	txt.Position = UDim2.new(0, 20, 0, 0)
+	txt.Size = UDim2.new(1, -24, 1, 0)
+	txt.Font = Enum.Font.GothamBold
+	txt.TextSize = State.textSize or 12
+	txt.TextColor3 = Color3.fromRGB(245, 245, 245)
+	txt.TextXAlignment = Enum.TextXAlignment.Left
 	txt.Text = ""
-	txt.Parent = bb
+	txt.Parent = bg
 
-	return hl, bb, txt
+	return hl, bb, txt, box, stroke, dot
 end
 
--- ---------- Drawing (2D corner boxes + snaplines) ----------
+-- ---------- 2D Corner Boxes + Snaplines (Universal Drawing & Gui) ----------
 local function ensureDraw(e)
-	if e.draw or not HasDrawing then return end
-	local d = { c = {}, snap = nil, txt = nil }
-	for i = 1, 8 do
-		local l = Drawing.new("Line")
-		l.Visible = false
-		l.Thickness = 1.5
-		d.c[i] = l
+	if e.draw then return end
+	if HasDrawing then
+		local d = { isGui = false, c = {}, snap = nil, txt = nil }
+		for i = 1, 8 do
+			local l = Drawing.new("Line")
+			l.Visible = false
+			l.Thickness = 1.8
+			d.c[i] = l
+		end
+		local s = Drawing.new("Line")
+		s.Visible = false
+		s.Thickness = 1.2
+		d.snap = s
+		e.draw = d
+	else
+		initEspHolders()
+		if not DrawScreenGui then return end
+		local d = { isGui = true, c = {}, snap = nil }
+		for i = 1, 8 do
+			local f = Instance.new("Frame")
+			f.BorderSizePixel = 0
+			f.Visible = false
+			f.ZIndex = 5
+			f.Parent = DrawScreenGui
+			d.c[i] = f
+		end
+		local s = Instance.new("Frame")
+		s.BorderSizePixel = 0
+		s.Visible = false
+		s.ZIndex = 4
+		s.AnchorPoint = Vector2.new(0, 0.5)
+		s.Parent = DrawScreenGui
+		d.snap = s
+		e.draw = d
 	end
-	local s = Drawing.new("Line")
-	s.Visible = false
-	s.Thickness = 1
-	d.snap = s
-	local t = Drawing.new("Text")
-	t.Visible = false
-	t.Center = true
-	t.Outline = true
-	t.Font = 3 -- monospace: digits/distances stay aligned
-	d.txt = t
-	e.draw = d
 end
 
 local function hideDraw(e)
 	local d = e.draw
 	if not d then return end
 	for i = 1, #d.c do d.c[i].Visible = false end
-	d.snap.Visible = false
-	d.txt.Visible = false
+	if d.snap then d.snap.Visible = false end
+	if d.txt then d.txt.Visible = false end
 end
 
 local function destroyDraw(e)
 	local d = e.draw
 	if not d then return end
-	for i = 1, #d.c do pcall(function() d.c[i]:Remove() end) end
-	pcall(function() d.snap:Remove() end)
-	pcall(function() d.txt:Remove() end)
+	if d.isGui then
+		for i = 1, #d.c do pcall(function() d.c[i]:Destroy() end) end
+		if d.snap then pcall(function() d.snap:Destroy() end) end
+	else
+		for i = 1, #d.c do pcall(function() d.c[i]:Remove() end) end
+		if d.snap then pcall(function() d.snap:Remove() end) end
+		if d.txt then pcall(function() d.txt:Remove() end) end
+	end
 	e.draw = nil
 end
 
@@ -559,70 +655,89 @@ local function drawEntry(e, origin)
 		hideDraw(e)
 		return
 	end
-	local showBox = State.boxes and HasDrawing
-	local showTrac = State.tracers and HasDrawing
+	local showBox = State.boxes
+	local showTrac = State.tracers
 	if (not showBox and not showTrac) or not isKindEnabled(e.kind) then
 		hideDraw(e)
 		return
 	end
-	local dist = (e.part.Position - origin).Magnitude
+	local pPos = e.part.Position
+	local dist = (pPos - origin).Magnitude
 	if dist > State.maxDist or not Camera then
 		hideDraw(e)
 		return
 	end
-	local sz = e.boxSize or e.part.Size
-	local top3 = e.part.Position + Vector3.new(0, sz.Y / 2, 0)
-	local bot3 = e.part.Position - Vector3.new(0, sz.Y / 2, 0)
-	local t2, vt = Camera:WorldToViewportPoint(top3)
-	local b2, vb = Camera:WorldToViewportPoint(bot3)
-	if (not vt and not vb) or t2.Z < 0 or b2.Z < 0 then
+
+	local cPos, onScreen = Camera:WorldToViewportPoint(pPos)
+	if not onScreen or cPos.Z <= 0 then
 		hideDraw(e)
 		return
 	end
-	local h = math.max(math.abs(t2.Y - b2.Y), 4)
-	local w = h * 0.55
-	local cx = (t2.X + b2.X) / 2
-	local ty = math.min(t2.Y, b2.Y)
-	local lx, rx, by = cx - w / 2, cx + w / 2, ty + h
-	local cl = math.max(math.min(w, h) * 0.25, 3)
+
+	local sz = e.boxSize or e.part.Size
+	local top = Camera:WorldToViewportPoint(pPos + Vector3.new(0, sz.Y / 2, 0))
+	local bot = Camera:WorldToViewportPoint(pPos - Vector3.new(0, sz.Y / 2, 0))
+	local h = math.clamp(math.abs(top.Y - bot.Y), 8, 1200)
+	local w = math.clamp(h * 0.58, 8, 800)
+	local cx, cy = cPos.X, (top.Y + bot.Y) / 2
+	local ty, by = cy - h / 2, cy + h / 2
+	local lx, rx = cx - w / 2, cx + w / 2
+	local cl = math.max(math.min(w, h) * 0.28, 4)
 	local col = kindColor(e.kind)
+
 	local pts = {
 		{ lx, ty, lx + cl, ty }, { lx, ty, lx, ty + cl },
 		{ rx - cl, ty, rx, ty }, { rx, ty, rx, ty + cl },
 		{ lx, by - cl, lx, by }, { lx, by, lx + cl, by },
 		{ rx - cl, by, rx, by }, { rx, by, rx, by - cl },
 	}
-	for i = 1, 8 do
-		local l = d.c[i]
-		l.Color = col
-		l.From = Vector2.new(pts[i][1], pts[i][2])
-		l.To = Vector2.new(pts[i][3], pts[i][4])
-		l.Visible = showBox
-	end
-	if showTrac then
-		local vs = Camera.ViewportSize
-		d.snap.Color = col
-		d.snap.From = Vector2.new(vs.X / 2, vs.Y)
-		d.snap.To = Vector2.new(cx, by)
-		d.snap.Visible = true
-	else
-		d.snap.Visible = false
-	end
-	if showBox then
-		-- Drawing text only when billboard labels are OFF: otherwise the
-		-- name + distance shows twice (this was the "double name" bug).
-		if State.labels then
-			d.txt.Visible = false
+
+	if d.isGui then
+		if showBox then
+			for i = 1, 8 do
+				local f = d.c[i]
+				local p = pts[i]
+				local x1, y1, x2, y2 = p[1], p[2], p[3], p[4]
+				f.BackgroundColor3 = col
+				f.Position = UDim2.new(0, math.min(x1, x2), 0, math.min(y1, y2))
+				f.Size = UDim2.new(0, math.max(math.abs(x2 - x1), 1.8), 0, math.max(math.abs(y2 - y1), 1.8))
+				f.Visible = true
+			end
 		else
-			local title = e.kind == "code" and (e.digits and ("CODE " .. e.digits) or "NOTE") or kindTitle(e.kind)
-			d.txt.Color = col
-			d.txt.Size = State.textSize
-			d.txt.Text = title .. "  " .. tostring(math.floor(dist)) .. "m"
-			d.txt.Position = Vector2.new(cx, ty - State.textSize - 6)
-			d.txt.Visible = true
+			for i = 1, 8 do d.c[i].Visible = false end
+		end
+		if showTrac then
+			local vs = Camera.ViewportSize
+			local from = Vector2.new(vs.X / 2, vs.Y)
+			local to = Vector2.new(cx, by)
+			local diff = to - from
+			local length = diff.Magnitude
+			local angle = math.deg(math.atan2(diff.Y, diff.X))
+			d.snap.BackgroundColor3 = col
+			d.snap.Position = UDim2.new(0, from.X, 0, from.Y)
+			d.snap.Size = UDim2.new(0, length, 0, 1.2)
+			d.snap.Rotation = angle
+			d.snap.Visible = true
+		else
+			d.snap.Visible = false
 		end
 	else
-		d.txt.Visible = false
+		for i = 1, 8 do
+			local l = d.c[i]
+			l.Color = col
+			l.From = Vector2.new(pts[i][1], pts[i][2])
+			l.To = Vector2.new(pts[i][3], pts[i][4])
+			l.Visible = showBox
+		end
+		if showTrac then
+			local vs = Camera.ViewportSize
+			d.snap.Color = col
+			d.snap.From = Vector2.new(vs.X / 2, vs.Y)
+			d.snap.To = Vector2.new(cx, by)
+			d.snap.Visible = true
+		else
+			d.snap.Visible = false
+		end
 	end
 end
 
@@ -653,15 +768,76 @@ end
 
 local function digitsInString(s)
 	if type(s) ~= "string" then return nil end
+	-- 1. Exact 4 consecutive digits
 	local m4 = string.match(s, "%d%d%d%d")
 	if m4 then return string.sub(m4, 1, 8) end
+	-- 2. Strip all non-digit characters (handles "1 2 3 4", "1 - 2 - 3 - 4", "Code: 1 2 3 4")
+	local clean = string.gsub(s, "%D", "")
+	if #clean >= 4 and #clean <= 8 then
+		return string.sub(clean, 1, 8)
+	end
+	if #clean == 3 then
+		return clean
+	end
 	local m3 = string.match(s, "%d%d%d+")
 	if m3 then return string.sub(m3, 1, 8) end
 	return nil
 end
 
--- Read digits inside an object subtree (screens, prompts, code values).
+local function checkAttributesForDigits(inst)
+	if typeof(inst) ~= "Instance" then return nil end
+	local ok, attrs = pcall(function() return inst:GetAttributes() end)
+	if ok and type(attrs) == "table" then
+		for name, val in pairs(attrs) do
+			local n = string.lower(tostring(name))
+			local s = tostring(val)
+			if string.find(n, "code", 1, true) or string.find(n, "pass", 1, true)
+				or string.find(n, "pin", 1, true) or string.find(n, "digit", 1, true)
+				or string.find(n, "note", 1, true) or string.find(n, "answer", 1, true) then
+				local d = digitsInString(s)
+				if d then return d end
+			end
+			local d = digitsInString(s)
+			if d and #d == 4 then return d end
+		end
+	end
+	return nil
+end
+
+local function collectSingleDigits(container)
+	if typeof(container) ~= "Instance" then return nil end
+	local digits = {}
+	local ok, descs = pcall(function() return container:GetDescendants() end)
+	if not ok or type(descs) ~= "table" then return nil end
+	for i = 1, #descs do
+		local d = descs[i]
+		if isOurEsp(d) then
+			-- skip
+		elseif d:IsA("TextLabel") or d:IsA("TextButton") then
+			local t = string.match(d.Text or "", "%d")
+			if t and #t == 1 then
+				digits[#digits + 1] = t
+			end
+		elseif d:IsA("StringValue") or d:IsA("IntValue") or d:IsA("NumberValue") then
+			local t = string.match(tostring(d.Value or ""), "%d")
+			if t and #t == 1 then
+				digits[#digits + 1] = t
+			end
+		end
+	end
+	if #digits == 4 then
+		return table.concat(digits, "")
+	end
+	return nil
+end
+
+-- Read digits inside an object subtree (screens, prompts, code values, attributes).
 local function extractDigits(root)
+	if typeof(root) ~= "Instance" then return nil end
+	-- Check root attributes directly
+	local attrCode = checkAttributesForDigits(root)
+	if attrCode then return attrCode end
+
 	local found = nil
 	local ok, descendants = pcall(function() return root:GetDescendants() end)
 	if not ok or type(descendants) ~= "table" then return nil end
@@ -685,13 +861,22 @@ local function extractDigits(root)
 			end
 		elseif d:IsA("StringValue") or d:IsA("IntValue") or d:IsA("NumberValue") then
 			local n = lowerName(d)
-			if string.find(n, "code", 1, true) or string.find(n, "pass", 1, true) or string.find(n, "pin", 1, true) then
-				found = tostring(d.Value)
-				break
+			if string.find(n, "code", 1, true) or string.find(n, "pass", 1, true) or string.find(n, "pin", 1, true) or string.find(n, "answer", 1, true) then
+				local m = digitsInString(tostring(d.Value))
+				if m then
+					found = m
+					break
+				end
 			end
 		end
+		local da = checkAttributesForDigits(d)
+		if da then
+			found = da
+			break
+		end
 	end
-	return found
+	if found then return found end
+	return collectSingleDigits(root)
 end
 
 -- Scan every world text for digits. Marks the NOTE/SCREEN/PAPER where the
@@ -709,8 +894,8 @@ local function scanCodeTexts()
 			if digits then
 				local part = adorneePartForText(d)
 				if part and not isEntryObject(part) and not isEntryObject(part.Parent) then
-					local hl, bb, txt = makeEspObjects(part, part)
-					Tracked[d] = { kind = "code", target = part, part = part, boxSize = part.Size, hl = hl, bb = bb, txt = txt, digits = digits, label = "CODE", root = d }
+					local hl, bb, txt, box, stroke, dot = makeEspObjects(part, part)
+					Tracked[d] = { kind = "code", target = part, part = part, boxSize = part.Size, hl = hl, bb = bb, txt = txt, box = box, stroke = stroke, dot = dot, digits = digits, label = "CODE", root = d }
 				end
 			end
 		elseif d:IsA("ProximityPrompt") and not Tracked[d] then
@@ -719,8 +904,8 @@ local function scanCodeTexts()
 			if hideHost and not Tracked[hideHost] and State.closets then
 				local target, part = resolveTarget(hideHost)
 				if target and part then
-					local hl, bb, txt = makeEspObjects(target, part)
-					Tracked[hideHost] = { kind = "closet", target = target, part = part, boxSize = boxSizeOf(target, part), hl = hl, bb = bb, txt = txt, digits = nil, label = "CLOSET", root = hideHost }
+					local hl, bb, txt, box, stroke, dot = makeEspObjects(target, part)
+					Tracked[hideHost] = { kind = "closet", target = target, part = part, boxSize = boxSizeOf(target, part), hl = hl, bb = bb, txt = txt, box = box, stroke = stroke, dot = dot, digits = nil, label = "CLOSET", root = hideHost }
 				end
 			end
 			-- A "read this" prompt marks its host as a code location.
@@ -728,8 +913,8 @@ local function scanCodeTexts()
 			if host and not Tracked[host] then
 				local target, part = resolveTarget(host)
 				if target and part then
-					local hl, bb, txt = makeEspObjects(target, part)
-					Tracked[host] = { kind = "code", target = target, part = part, boxSize = boxSizeOf(target, part), hl = hl, bb = bb, txt = txt, digits = extractDigits(host), label = "NOTE", root = host }
+					local hl, bb, txt, box, stroke, dot = makeEspObjects(target, part)
+					Tracked[host] = { kind = "code", target = target, part = part, boxSize = boxSizeOf(target, part), hl = hl, bb = bb, txt = txt, box = box, stroke = stroke, dot = dot, digits = extractDigits(host), label = "NOTE", root = host }
 				end
 			end
 		elseif (d:IsA("StringValue") or d:IsA("IntValue") or d:IsA("NumberValue")) and not Tracked[d] then
@@ -746,8 +931,8 @@ local function scanCodeTexts()
 						part = p
 					end
 					if part and not isEntryObject(part) then
-						local hl, bb, txt = makeEspObjects(part, part)
-						Tracked[d] = { kind = "code", target = part, part = part, boxSize = part.Size, hl = hl, bb = bb, txt = txt, digits = string.sub(val, 1, 8), label = "CODE", root = d }
+						local hl, bb, txt, box, stroke, dot = makeEspObjects(part, part)
+						Tracked[d] = { kind = "code", target = part, part = part, boxSize = part.Size, hl = hl, bb = bb, txt = txt, box = box, stroke = stroke, dot = dot, digits = string.sub(val, 1, 8), label = "CODE", root = d }
 					end
 				end
 			end
@@ -792,10 +977,9 @@ local function scanPlayerGuiForCode()
 	for _, d in ipairs(pg:GetDescendants()) do
 		if isOurEsp(d) then
 			-- skip
-		elseif (d:IsA("TextLabel") or d:IsA("TextButton")) and d.Visible then
+		elseif d:IsA("TextLabel") or d:IsA("TextButton") then
 			local t = d.Text or ""
-			-- skip our own status-like texts
-			if not string.find(t, "monster:", 1, true) then
+			if not string.find(t, "monster:", 1, true) and not string.find(t, "URANIUM", 1, true) then
 				local m = digitsInString(t)
 				if m then
 					if #m == 4 then best = m break end
@@ -803,6 +987,8 @@ local function scanPlayerGuiForCode()
 				end
 			end
 		end
+		local a = checkAttributesForDigits(d)
+		if a and #a == 4 then best = a break end
 	end
 	return best or fallback
 end
@@ -814,13 +1000,13 @@ local restoreChamForFn = nil
 local function removeEntry(inst)
 	local e = Tracked[inst]
 	if e then
-		-- Restore material-cham parts (engine assigned below).
 		if e.target and restoreChamForFn then
 			pcall(restoreChamForFn, e.target)
 		end
 		destroyDraw(e)
-		pcall(function() e.hl:Destroy() end)
-		pcall(function() e.bb:Destroy() end)
+		if e.hl then pcall(function() e.hl:Destroy() end) end
+		if e.box then pcall(function() e.box:Destroy() end) end
+		if e.bb then pcall(function() e.bb:Destroy() end) end
 		Tracked[inst] = nil
 	end
 end
@@ -843,9 +1029,6 @@ local function isKindEnabled(kind)
 end
 
 -- ===================== MATERIAL CHAMS =====================
--- ForceField overlay over every marked target, originals restored on
--- remove/disable/unload. Engine sits here so updateEntry/addEntry (below)
--- and removeEntry (above, via restoreChamForFn) can all reach it.
 local ChamOrig = {} -- [BasePart] = {mat, color, transp}
 
 local function chamParts(target)
@@ -900,6 +1083,27 @@ end
 
 local function applyMaterialChams(on, quiet)
 	State.matChams = on
+	for _, e in pairs(Tracked) do
+		if isKindEnabled(e.kind) then
+			local col = kindColor(e.kind)
+			if e.hl then
+				pcall(function()
+					e.hl.FillColor = col
+					e.hl.FillTransparency = on and State.chamTransp or 1
+				end)
+			end
+			if e.box then
+				pcall(function()
+					e.box.Color3 = col
+					e.box.Transparency = State.chamTransp
+					e.box.Visible = on
+				end)
+			end
+			if on and e.target then
+				applyChamToTarget(e.target, col)
+			end
+		end
+	end
 	if not on then
 		for part, o in pairs(ChamOrig) do
 			ChamOrig[part] = nil
@@ -914,29 +1118,15 @@ local function applyMaterialChams(on, quiet)
 		for _, e in pairs(Tracked) do
 			e.chammed = nil
 		end
-		return
 	end
-	for _, e in pairs(Tracked) do
-		if e.target and isKindEnabled(e.kind) then
-			e.chammed = true
-			applyChamToTarget(e.target, kindColor(e.kind))
-		end
-	end
-	local n = 0
-	for _ in pairs(ChamOrig) do n = n + 1 end
 	if on and not quiet then
-		if n == 0 then
-			notify("URANIUM", "Material chams: no targets — enable an ESP kind first", "info")
-		else
-			notify("URANIUM", "Material chams ON (" .. n .. " parts)", "sparkles")
-		end
+		notify("URANIUM", "Material chams ON", "sparkles")
 	end
 end
 
 -- Re-apply after transparency / flat / color changes.
 local function refreshChamsIfOn()
 	if not State.matChams then return end
-	applyMaterialChams(false, true)
 	applyMaterialChams(true, true)
 end
 
@@ -961,12 +1151,12 @@ local function addEntry(inst)
 		Tracked[inst] = { kind = kind, target = nil, part = nil, boxSize = nil, hl = nil, bb = nil, txt = nil, draw = nil, digits = nil, label = label, root = inst }
 		return
 	end
-	local hl, bb, txt = makeEspObjects(target, part)
+	local hl, bb, txt, box, stroke, dot = makeEspObjects(target, part)
 	local digits = nil
 	if kind == "code" then
 		digits = extractDigits(inst)
 	end
-	Tracked[inst] = { kind = kind, target = target, part = part, boxSize = boxSizeOf(target, part), hl = hl, bb = bb, txt = txt, draw = nil, digits = digits, label = label, root = inst }
+	Tracked[inst] = { kind = kind, target = target, part = part, boxSize = boxSizeOf(target, part), hl = hl, bb = bb, txt = txt, box = box, stroke = stroke, dot = dot, draw = nil, digits = digits, label = label, root = inst }
 end
 
 -- Force-mark a known object even when the generic scan skips it (e.g. a
@@ -989,16 +1179,16 @@ local function forceEntry(inst, kind, label)
 				target = inner
 			end
 		else
-			Tracked[inst] = { kind = kind, target = nil, part = nil, boxSize = nil, hl = nil, bb = nil, txt = nil, draw = nil, digits = nil, label = label, root = inst }
+			Tracked[inst] = { kind = kind, target = nil, part = nil, boxSize = nil, hl = nil, bb = nil, txt = nil, box = nil, stroke = nil, dot = nil, draw = nil, digits = nil, label = label, root = inst }
 			return
 		end
 	end
-	local hl, bb, txt = makeEspObjects(target, part)
+	local hl, bb, txt, box, stroke, dot = makeEspObjects(target, part)
 	local digits = nil
 	if kind == "code" then
 		digits = extractDigits(inst)
 	end
-	Tracked[inst] = { kind = kind, target = target, part = part, boxSize = boxSizeOf(target, part), hl = hl, bb = bb, txt = txt, draw = nil, digits = digits, label = label, root = inst }
+	Tracked[inst] = { kind = kind, target = target, part = part, boxSize = boxSizeOf(target, part), hl = hl, bb = bb, txt = txt, box = box, stroke = stroke, dot = dot, draw = nil, digits = digits, label = label, root = inst }
 end
 
 -- Structural closet pass: Hide prompts, Hide click detectors, and closet models/parts
@@ -1012,8 +1202,8 @@ local function scanClosetHosts()
 			if host and not Tracked[host] and inWorkspace(host) then
 				local target, part = resolveTarget(host)
 				if target and part then
-					local hl, bb, txt = makeEspObjects(target, part)
-					Tracked[host] = { kind = "closet", target = target, part = part, boxSize = boxSizeOf(target, part), hl = hl, bb = bb, txt = txt, digits = nil, label = "CLOSET", root = host }
+					local hl, bb, txt, box, stroke, dot = makeEspObjects(target, part)
+					Tracked[host] = { kind = "closet", target = target, part = part, boxSize = boxSizeOf(target, part), hl = hl, bb = bb, txt = txt, box = box, stroke = stroke, dot = dot, digits = nil, label = "CLOSET", root = host }
 				end
 			end
 		elseif inst:IsA("ClickDetector") then
@@ -1150,22 +1340,16 @@ local function updateEntry(e, origin, maxDist, refreshDigits)
 	if not e.target or not e.part then
 		local target, part = resolveTarget(root)
 		if target and part and EspFolder then
-			local hl, bb, txt = makeEspObjects(target, part)
-			e.target, e.part, e.hl, e.bb, e.txt = target, part, hl, bb, txt
+			local hl, bb, txt, box, stroke, dot = makeEspObjects(target, part)
+			e.target, e.part, e.hl, e.bb, e.txt, e.box, e.stroke, e.dot = target, part, hl, bb, txt, box, stroke, dot
 			e.boxSize = boxSizeOf(target, part)
 		else
 			return true -- still pending
 		end
 	end
-	-- Drawing objects are created lazily here: without this call boxes and
-	-- snaplines never render (this was the "boxes don't work" bug).
-	if HasDrawing and (State.boxes or State.tracers) then
+	-- Universal 2D boxes & snaplines
+	if State.boxes or State.tracers then
 		ensureDraw(e)
-	end
-	-- Material chams for entries that appeared while the toggle is on.
-	if State.matChams and e.target and not e.chammed and isKindEnabled(e.kind) then
-		e.chammed = true
-		applyChamToTarget(e.target, kindColor(e.kind))
 	end
 	if e.kind == "code" and refreshDigits then
 		if not refreshCodeDigits(e) then
@@ -1175,20 +1359,34 @@ local function updateEntry(e, origin, maxDist, refreshDigits)
 	local pos = e.part.Position
 	local dist = (pos - origin).Magnitude
 	if dist > maxDist then
-		e.hl.Enabled = false
-		e.bb.Enabled = false
+		if e.hl then e.hl.Enabled = false end
+		if e.box then e.box.Visible = false end
+		if e.bb then e.bb.Enabled = false end
 		return true
 	end
-	e.hl.Enabled = State.chams
-	e.bb.Enabled = State.labels
 	local col = kindColor(e.kind)
-	pcall(function() e.hl.OutlineColor = col end)
-	pcall(function() e.txt.TextColor3 = col end)
+	if e.hl then
+		e.hl.Enabled = State.chams
+		e.hl.OutlineColor = col
+		e.hl.FillColor = col
+		e.hl.FillTransparency = State.matChams and State.chamTransp or 1
+	end
+	if e.box then
+		e.box.Visible = State.matChams
+		e.box.Color3 = col
+		e.box.Transparency = State.chamTransp
+		e.box.Size = (e.part and e.part.Size or Vector3.new(3, 5, 3)) + Vector3.new(0.04, 0.04, 0.04)
+	end
+	if e.bb then e.bb.Enabled = State.labels end
+	if e.stroke then pcall(function() e.stroke.Color = col end) end
+	if e.dot then pcall(function() e.dot.BackgroundColor3 = col end) end
 	local title = e.label
 	if e.kind == "code" then
 		title = e.digits and ("CODE " .. e.digits) or "NOTE"
 	end
-	e.txt.Text = title .. "\n" .. tostring(math.floor(dist)) .. "m"
+	if e.txt then
+		e.txt.Text = title .. " [" .. tostring(math.floor(dist)) .. "m]"
+	end
 	return true
 end
 
@@ -1351,65 +1549,11 @@ do
 	if hrp then SpawnPos = hrp.Position end
 end
 
--- ===================== SHADER CHAMS =====================
--- Fullscreen monochrome FX (a ColorCorrectionEffect in Lighting): the whole
--- game renders desaturated with boosted contrast while ESP marks pop.
-local function ensureShader()
-	if not State.shaderChams then return end
-	local cc = nil
-	-- Find existing shader
-	pcall(function()
-		for _, child in ipairs(Lighting:GetChildren()) do
-			if child.Name == "UraniumShader" and child:IsA("ColorCorrectionEffect") then
-				cc = child
-				break
-			end
-		end
-	end)
-	-- Create if missing
-	if not cc then
-		local ok, fx = pcall(function()
-			local inst = Instance.new("ColorCorrectionEffect")
-			inst.Name = "UraniumShader"
-			inst.Parent = Lighting
-			return inst
-		end)
-		if ok and fx then
-			cc = fx
-		else
-			-- Fallback: try cloning an existing CCE
-			pcall(function()
-				local existing = Lighting:FindFirstChildOfClass("ColorCorrectionEffect")
-				if existing then
-					local clone = existing:Clone()
-					clone.Name = "UraniumShader"
-					clone.Parent = Lighting
-					cc = clone
-				end
-			end)
-		end
-	end
-	if not cc then return end
-	pcall(function()
-		cc.Saturation = State.shaderSat
-		cc.Contrast = State.shaderContrast
-		cc.Brightness = 0
-		cc.Enabled = true
-	end)
-end
-
-local function applyShaderChams(on)
-	State.shaderChams = on
-	if not on then
-		pcall(function()
-			for _, child in ipairs(Lighting:GetChildren()) do
-				if child.Name == "UraniumShader" then child:Destroy() end
-			end
-		end)
-		return
-	end
-	ensureShader()
-end
+-- Destroy any leftover shader from previous sessions
+pcall(function()
+	local oldShader = Lighting:FindFirstChild("UraniumShader")
+	if oldShader then oldShader:Destroy() end
+end)
 
 local function teleportSpawn()
 	local hrp = myHRP()
@@ -1843,20 +1987,87 @@ local function findCodeNote()
 	return workspace:FindFirstChild("CodeNote", true)
 end
 
+local function findCodeInKeypadOrMap()
+	local map = mapRoot()
+	local c = checkAttributesForDigits(map)
+	if c and #c == 4 then return c end
+
+	local pad = keypadModel()
+	if pad then
+		c = checkAttributesForDigits(pad)
+		if c and #c == 4 then return c end
+		for _, d in ipairs(pad:GetDescendants()) do
+			if d:IsA("StringValue") or d:IsA("IntValue") or d:IsA("NumberValue") then
+				local n = lowerName(d)
+				if string.find(n, "code", 1, true) or string.find(n, "pass", 1, true) or string.find(n, "pin", 1, true) or string.find(n, "answer", 1, true) then
+					local m = digitsInString(tostring(d.Value))
+					if m and #m == 4 then return m end
+				end
+			end
+			local a = checkAttributesForDigits(d)
+			if a and #a == 4 then return a end
+		end
+	end
+	return nil
+end
+
 -- Direct read of the real paper: CodeNote > Printed > Digits (plain
 -- TextLabel, no SurfaceGui). Returns the digit string or nil.
 local function readCodeNoteDirect()
 	local note = findCodeNote()
 	if not note then return nil end
+	local a = checkAttributesForDigits(note)
+	if a and #a == 4 then return a end
+
 	local printed = note:FindFirstChild("Printed")
 	local digitsObj = (printed and printed:FindFirstChild("Digits"))
 		or note:FindFirstChild("Digits", true)
 	if digitsObj and (digitsObj:IsA("TextLabel") or digitsObj:IsA("TextButton")) then
-		local m = nil
-		pcall(function() m = digitsInString(digitsObj.Text) end)
-		if m then return m end
+		local m = digitsInString(digitsObj.Text)
+		if m and #m == 4 then return m end
 	end
 	return extractDigits(note)
+end
+
+local function applyFoundCode(code)
+	if not code or #code < 3 then return end
+	for _, e in pairs(Tracked) do
+		if e.kind == "code" then
+			e.digits = code
+		end
+	end
+end
+
+-- Read the real paper first (CodeNote > Printed > Digits), then tracked
+-- marks, then keypad/map attributes, then every NOTE (fires Read prompts) + UI + world scan.
+local function acquireCode()
+	local direct = readCodeNoteDirect()
+	if direct and #direct == 4 then applyFoundCode(direct) return direct end
+
+	local code = getFoundCode()
+	if code and #code == 4 then applyFoundCode(code) return code end
+
+	local padCode = findCodeInKeypadOrMap()
+	if padCode and #padCode == 4 then applyFoundCode(padCode) return padCode end
+
+	-- Fire prompts on CodeNote and all note objects
+	local note = findCodeNote()
+	if note then firePromptsIn(note) end
+	for _, e in pairs(Tracked) do
+		if e.kind == "code" and e.root and inWorkspace(e.root) then
+			firePromptsIn(e.root)
+		end
+	end
+	fireAllReadPrompts(20)
+	task.wait(0.3)
+
+	code = scanPlayerGuiForCode() or getFoundCode()
+	if code and #code == 4 then applyFoundCode(code) return code end
+
+	scanCodeTexts()
+	code = getFoundCode() or readCodeNoteDirect() or scanPlayerGuiForCode() or findCodeInKeypadOrMap()
+	if code then applyFoundCode(code) end
+	return code
 end
 -- Hold a key Tool in hand: doors often validate the equipped key,
 -- firing their prompt empty-handed does nothing.
@@ -2006,26 +2217,6 @@ local function fireAllReadPrompts(limit)
 	return n
 end
 
--- Read the real paper first (CodeNote > Printed > Digits), then tracked
--- marks, then every NOTE (fires Read prompts) + UI + world scan.
-local function acquireCode()
-	local direct = readCodeNoteDirect()
-	if direct and #direct == 4 then return direct end
-	local code = getFoundCode()
-	if code and #code == 4 then return code end
-	for _, e in pairs(Tracked) do
-		if e.kind == "code" and e.root and inWorkspace(e.root) then
-			firePromptsIn(e.root)
-		end
-	end
-	fireAllReadPrompts(20)
-	task.wait(0.6)
-	code = scanPlayerGuiForCode() or getFoundCode()
-	if code then return code end
-	if direct then return direct end
-	scanCodeTexts()
-	return getFoundCode() or readCodeNoteDirect()
-end
 
 local function enterCodeAtPanel(panel, code, force)
 	pressPanelDigits(panel, code, force)
@@ -2648,20 +2839,12 @@ local function buildGui()
 	vSec:Toggle({
 		Name = "2D boxes", Default = State.boxes, Flag = "ura_boxes",
 		Callback = function(v)
-			if v and not HasDrawing then
-				notify("URANIUM", "Drawing unavailable on this executor", "info")
-				return
-			end
 			State.boxes = v
 		end,
 	})
 	vSec:Toggle({
 		Name = "Snaplines", Default = State.tracers, Flag = "ura_tracers",
 		Callback = function(v)
-			if v and not HasDrawing then
-				notify("URANIUM", "Drawing unavailable on this executor", "info")
-				return
-			end
 			State.tracers = v
 		end,
 	})
@@ -2687,26 +2870,6 @@ local function buildGui()
 		Callback = function(v)
 			State.chamFlat = v
 			refreshChamsIfOn()
-		end,
-	})
-	vSec:Toggle({
-		Name = "Shader chams (mono FX)", Default = State.shaderChams, Flag = "ura_shader",
-		Callback = function(v)
-			applyShaderChams(v)
-		end,
-	})
-	vSec:Slider({
-		Name = "Shader saturation", Min = -1, Max = 1, Default = State.shaderSat, Flag = "ura_shadersat",
-		Callback = function(v)
-			State.shaderSat = v
-			if State.shaderChams then ensureShader() end
-		end,
-	})
-	vSec:Slider({
-		Name = "Shader contrast", Min = -1, Max = 1, Default = State.shaderContrast, Flag = "ura_shadercon",
-		Callback = function(v)
-			State.shaderContrast = v
-			if State.shaderChams then ensureShader() end
 		end,
 	})
 	vSec:Slider({
@@ -3304,19 +3467,14 @@ trackConnection(RunService.Heartbeat:Connect(function(dt)
 		end
 	end
 	flyStep()
-	if State.fullbright or State.shaderChams or State.matChams then
+	if State.fullbright or State.matChams then
 		accFb = accFb + dt
 		if accFb >= 1 then
 			accFb = 0
 			if State.fullbright then enforceFullbright() end
-			if State.shaderChams then ensureShader() end
 			-- Re-enforce material chams: the game may reset part properties
 			if State.matChams then
-				for _, e in pairs(Tracked) do
-					if e.target and isKindEnabled(e.kind) then
-						applyChamToTarget(e.target, kindColor(e.kind))
-					end
-				end
+				refreshChamsIfOn()
 			end
 		end
 	end
@@ -3373,21 +3531,23 @@ trackConnection(RunService.Heartbeat:Connect(function(dt)
 	end
 end))
 
--- 2D boxes / snaplines render loop (Drawing only)
-if HasDrawing then
-	trackConnection(RunService.RenderStepped:Connect(function()
-		if not State.running then return end
-		if not Camera then return end
-		local origin = rootPosition()
-		for _, e in pairs(Tracked) do
-			if e.part and e.boxSize then
-				pcall(drawEntry, e, origin)
-			elseif e.draw then
-				hideDraw(e)
+-- 2D boxes / snaplines render loop (Drawing or ScreenGui fallback)
+trackConnection(RunService.RenderStepped:Connect(function()
+	if not State.running then return end
+	if not Camera then return end
+	local origin = rootPosition()
+	local needDraw = State.boxes or State.tracers
+	for _, e in pairs(Tracked) do
+		if e.part and e.boxSize then
+			if needDraw and not e.draw then
+				ensureDraw(e)
 			end
+			pcall(drawEntry, e, origin)
+		elseif e.draw then
+			hideDraw(e)
 		end
-	end))
-end
+	end
+end))
 
 if game.PlaceId ~= TARGET_PLACE then
 	notify("URANIUM", "Outside MONOCHROME — ESP still active", "info")
@@ -3437,9 +3597,7 @@ function Api.Unload()
 	State.instantPrompt = false
 	State.godmode = false
 	State.matChams = false
-	State.shaderChams = false
 	applyMaterialChams(false, true)
-	applyShaderChams(false)
 	for _, c in ipairs(GodConns) do
 		pcall(function() c:Disconnect() end)
 	end
