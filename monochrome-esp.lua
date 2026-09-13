@@ -193,18 +193,11 @@ local State = {
 	boxes = true, -- 2D corner boxes (needs Drawing)
 	tracers = true, -- snaplines (needs Drawing)
 	labels = true, -- name/distance billboards
-	matChams = false, -- 3D Box Adornment + Highlight Fill
-	chamTransp = 0.35, -- material cham transparency
-	chamFlat = true, -- tint chammed parts with the kind color
-	monsterMaterial = "Neon", -- Material for monster chams (Neon, Wood, Grass, Ground/Dirt, etc.)
 	noclip = false,
 	fly = false,
 	instacollect = false, -- grab keys the moment you walk into range
 	collectRadius = 12, -- pickup radius for Insta Collect (studs)
-	playerEsp = false, -- see other players (trolling tab)
-	visit = false, -- visit-loop: TP to each player in turn
-	visitDelay = 3,
-	loopTpToMonster = false, -- loop TP players to VER
+	playerEsp = false, -- see other players
 	instantPrompt = false,
 	fullbright = false,
 	autowin = false,
@@ -514,26 +507,14 @@ local function makeEspObjects(target, part)
 	hl.Name = "Uranium_HL"
 	hl.Adornee = target
 	hl.FillColor = col
-	hl.FillTransparency = State.matChams and State.chamTransp or 1
+	hl.FillTransparency = 1
 	hl.OutlineColor = col
 	hl.OutlineTransparency = 0
 	hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
 	hl.Enabled = State.chams
 	hl.Parent = EspFolder
 
-	-- 2. Material Chams 3D Box Adornment (Solid through-walls glow)
-	local box = Instance.new("BoxHandleAdornment")
-	box.Name = "Uranium_Box"
-	box.Adornee = part
-	box.AlwaysOnTop = true
-	box.ZIndex = 5
-	box.Size = (part and part.Size or Vector3.new(3, 5, 3)) + Vector3.new(0.04, 0.04, 0.04)
-	box.Color3 = col
-	box.Transparency = State.chamTransp
-	box.Visible = State.matChams
-	box.Parent = EspFolder
-
-	-- 3. Modern Sleek Billboard Badge
+	-- 2. Modern Sleek Billboard Badge
 	local bb = Instance.new("BillboardGui")
 	bb.Name = "Uranium_BB"
 	bb.Adornee = part
@@ -586,7 +567,7 @@ local function makeEspObjects(target, part)
 	txt.Text = ""
 	txt.Parent = bg
 
-	return hl, bb, txt, box, stroke, dot
+	return hl, bb, txt, stroke, dot
 end
 
 -- ---------- 2D Corner Boxes + Snaplines (Universal Drawing & Gui) ----------
@@ -1087,19 +1068,11 @@ local function scanPlayerGuiForCode()
 	return best or fallback
 end
 
--- Forward: material-cham restore, assigned by the chams engine below
--- (removeEntry runs before that code textually).
-local restoreChamForFn = nil
-
 local function removeEntry(inst)
 	local e = Tracked[inst]
 	if e then
-		if e.target and restoreChamForFn then
-			pcall(restoreChamForFn, e.target)
-		end
 		destroyDraw(e)
 		if e.hl then pcall(function() e.hl:Destroy() end) end
-		if e.box then pcall(function() e.box:Destroy() end) end
 		if e.bb then pcall(function() e.bb:Destroy() end) end
 		Tracked[inst] = nil
 	end
@@ -1120,181 +1093,6 @@ local function isKindEnabled(kind)
 	if kind == "closet" then return State.closets end
 	if kind == "player" then return State.playerEsp end
 	return false
-end
-
--- ===================== MATERIAL CHAMS =====================
-local MATERIAL_OPTIONS = {
-	"Neon",
-	"Wood",
-	"WoodPlanks",
-	"Ground (Dirt)",
-	"Grass",
-	"Mud",
-	"ForceField",
-	"Glass",
-	"Metal",
-	"DiamondPlate",
-	"Foil",
-	"Brick",
-	"Concrete",
-	"Granite",
-	"Marble",
-	"Ice",
-	"CorrodedMetal",
-	"Plastic",
-	"SmoothPlastic",
-}
-
-local MATERIAL_MAP = {
-	["Neon"] = Enum.Material.Neon,
-	["Wood"] = Enum.Material.Wood,
-	["WoodPlanks"] = Enum.Material.WoodPlanks,
-	["Ground (Dirt)"] = Enum.Material.Ground,
-	["Grass"] = Enum.Material.Grass,
-	["Mud"] = Enum.Material.Mud,
-	["ForceField"] = Enum.Material.ForceField,
-	["Glass"] = Enum.Material.Glass,
-	["Metal"] = Enum.Material.Metal,
-	["DiamondPlate"] = Enum.Material.DiamondPlate,
-	["Foil"] = Enum.Material.Foil,
-	["Brick"] = Enum.Material.Brick,
-	["Concrete"] = Enum.Material.Concrete,
-	["Granite"] = Enum.Material.Granite,
-	["Marble"] = Enum.Material.Marble,
-	["Ice"] = Enum.Material.Ice,
-	["CorrodedMetal"] = Enum.Material.CorrodedMetal,
-	["Plastic"] = Enum.Material.Plastic,
-	["SmoothPlastic"] = Enum.Material.SmoothPlastic,
-}
-
-local ChamOrig = {} -- [BasePart] = {mat, color, transp, textureId}
-
-local function chamParts(target)
-	local parts = {}
-	if typeof(target) ~= "Instance" then return parts end
-	if target:IsA("BasePart") then
-		parts[1] = target
-	elseif target:IsA("Model") then
-		local ok, descs = pcall(function() return target:GetDescendants() end)
-		if ok then
-			for i = 1, #descs do
-				if descs[i]:IsA("BasePart") then parts[#parts + 1] = descs[i] end
-			end
-		end
-	end
-	return parts
-end
-
-local function applyChamToTarget(target, col, kind)
-	local chosenMat = Enum.Material.Neon
-	if kind == "monster" then
-		chosenMat = MATERIAL_MAP[State.monsterMaterial] or Enum.Material.Neon
-	else
-		chosenMat = Enum.Material.ForceField
-	end
-
-	for _, part in ipairs(chamParts(target)) do
-		if not ChamOrig[part] and not isOurEsp(part) then
-			local ok, m, c, t = pcall(function()
-				return part.Material, part.Color, part.Transparency
-			end)
-			if ok then
-				local tex = nil
-				if part:IsA("MeshPart") then
-					pcall(function() tex = part.TextureID end)
-				end
-				ChamOrig[part] = { mat = m, color = c, transp = t, textureId = tex }
-			end
-		end
-
-		pcall(function()
-			part.Material = chosenMat
-			if State.chamFlat then
-				part.Color = col
-			end
-			part.Transparency = State.chamTransp
-			if part:IsA("MeshPart") then
-				if chosenMat ~= Enum.Material.ForceField and chosenMat ~= Enum.Material.SmoothPlastic then
-					part.TextureID = ""
-				else
-					if ChamOrig[part] and ChamOrig[part].textureId then
-						part.TextureID = ChamOrig[part].textureId
-					end
-				end
-			end
-		end)
-	end
-end
-
-restoreChamForFn = function(target)
-	for _, part in ipairs(chamParts(target)) do
-		local o = ChamOrig[part]
-		if o then
-			ChamOrig[part] = nil
-			pcall(function()
-				if part.Parent then
-					part.Material = o.mat
-					part.Color = o.color
-					part.Transparency = o.transp
-					if part:IsA("MeshPart") and o.textureId then
-						part.TextureID = o.textureId
-					end
-				end
-			end)
-		end
-	end
-end
-
-local function applyMaterialChams(on, quiet)
-	State.matChams = on
-	for _, e in pairs(Tracked) do
-		if isKindEnabled(e.kind) then
-			local col = kindColor(e.kind)
-			if e.hl then
-				pcall(function()
-					e.hl.FillColor = col
-					e.hl.FillTransparency = (on and e.kind == "monster") and 0.85 or (on and State.chamTransp or 1)
-				end)
-			end
-			if e.box then
-				pcall(function()
-					e.box.Color3 = col
-					e.box.Transparency = State.chamTransp
-					e.box.Visible = on and (e.kind ~= "monster")
-				end)
-			end
-			if on and e.target then
-				applyChamToTarget(e.target, col, e.kind)
-			end
-		end
-	end
-	if not on then
-		for part, o in pairs(ChamOrig) do
-			ChamOrig[part] = nil
-			pcall(function()
-				if part.Parent then
-					part.Material = o.mat
-					part.Color = o.color
-					part.Transparency = o.transp
-					if part:IsA("MeshPart") and o.textureId then
-						part.TextureID = o.textureId
-					end
-				end
-			end)
-		end
-		for _, e in pairs(Tracked) do
-			e.chammed = nil
-		end
-	end
-	if on and not quiet then
-		notify("URANIUM", "Monster Material: " .. tostring(State.monsterMaterial), "sparkles")
-	end
-end
-
--- Re-apply after transparency / flat / color changes.
-local function refreshChamsIfOn()
-	if not State.matChams then return end
-	applyMaterialChams(true, true)
 end
 
 local function addEntry(inst)
@@ -1318,15 +1116,12 @@ local function addEntry(inst)
 		Tracked[inst] = { kind = kind, target = nil, part = nil, boxSize = nil, hl = nil, bb = nil, txt = nil, draw = nil, digits = nil, label = label, root = inst }
 		return
 	end
-	local hl, bb, txt, box, stroke, dot = makeEspObjects(target, part)
+	local hl, bb, txt, stroke, dot = makeEspObjects(target, part)
 	local digits = nil
 	if kind == "code" then
 		digits = extractDigits(inst)
 	end
-	Tracked[inst] = { kind = kind, target = target, part = part, boxSize = boxSizeOf(target, part), hl = hl, bb = bb, txt = txt, box = box, stroke = stroke, dot = dot, draw = nil, digits = digits, label = label, root = inst }
-	if State.matChams and target then
-		applyChamToTarget(target, kindColor(kind), kind)
-	end
+	Tracked[inst] = { kind = kind, target = target, part = part, boxSize = boxSizeOf(target, part), hl = hl, bb = bb, txt = txt, stroke = stroke, dot = dot, draw = nil, digits = digits, label = label, root = inst }
 end
 
 -- Force-mark a known object even when the generic scan skips it (e.g. a
@@ -1353,15 +1148,12 @@ local function forceEntry(inst, kind, label)
 			return
 		end
 	end
-	local hl, bb, txt, box, stroke, dot = makeEspObjects(target, part)
+	local hl, bb, txt, stroke, dot = makeEspObjects(target, part)
 	local digits = nil
 	if kind == "code" then
 		digits = extractDigits(inst)
 	end
-	Tracked[inst] = { kind = kind, target = target, part = part, boxSize = boxSizeOf(target, part), hl = hl, bb = bb, txt = txt, box = box, stroke = stroke, dot = dot, draw = nil, digits = digits, label = label, root = inst }
-	if State.matChams and target then
-		applyChamToTarget(target, kindColor(kind), kind)
-	end
+	Tracked[inst] = { kind = kind, target = target, part = part, boxSize = boxSizeOf(target, part), hl = hl, bb = bb, txt = txt, stroke = stroke, dot = dot, draw = nil, digits = digits, label = label, root = inst }
 end
 
 -- Structural closet pass: Hide prompts, Hide click detectors, and closet models/parts
@@ -1513,8 +1305,8 @@ local function updateEntry(e, origin, maxDist, refreshDigits)
 	if not e.target or not e.part then
 		local target, part = resolveTarget(root)
 		if target and part and EspFolder then
-			local hl, bb, txt, box, stroke, dot = makeEspObjects(target, part)
-			e.target, e.part, e.hl, e.bb, e.txt, e.box, e.stroke, e.dot = target, part, hl, bb, txt, box, stroke, dot
+			local hl, bb, txt = makeEspObjects(target, part)
+			e.target, e.part, e.hl, e.bb, e.txt = target, part, hl, bb, txt
 			e.boxSize = boxSizeOf(target, part)
 		else
 			return true -- still pending
@@ -1533,7 +1325,6 @@ local function updateEntry(e, origin, maxDist, refreshDigits)
 	local dist = (pos - origin).Magnitude
 	if dist > maxDist then
 		if e.hl then e.hl.Enabled = false end
-		if e.box then e.box.Visible = false end
 		if e.bb then e.bb.Enabled = false end
 		return true
 	end
@@ -1542,13 +1333,7 @@ local function updateEntry(e, origin, maxDist, refreshDigits)
 		e.hl.Enabled = State.chams
 		e.hl.OutlineColor = col
 		e.hl.FillColor = col
-		e.hl.FillTransparency = (State.matChams and e.kind == "monster") and 0.85 or (State.matChams and State.chamTransp or 1)
-	end
-	if e.box then
-		e.box.Visible = State.matChams and (e.kind ~= "monster")
-		e.box.Color3 = col
-		e.box.Transparency = State.chamTransp
-		e.box.Size = (e.part and e.part.Size or Vector3.new(3, 5, 3)) + Vector3.new(0.04, 0.04, 0.04)
+		e.hl.FillTransparency = 1
 	end
 	if e.bb then e.bb.Enabled = State.labels end
 	if e.stroke then pcall(function() e.stroke.Color = col end) end
@@ -2447,57 +2232,82 @@ local function screenClickPart(part)
 	return vimClick(v.X, v.Y)
 end
 
+-- Read the digit currently shown on one Keypad slot (Readout label).
+local function keypadSlotDigit(digitW)
+	local readout = digitW:FindFirstChild("Readout", true)
+	local shown = nil
+	if readout then
+		if readout:IsA("TextLabel") or readout:IsA("TextButton") then
+			pcall(function() shown = readout.Text end)
+		else
+			local lbl = readout:FindFirstChildWhichIsA("TextLabel", true)
+				or readout:FindFirstChildWhichIsA("TextButton", true)
+			if lbl then pcall(function() shown = lbl.Text end) end
+		end
+	end
+	return shown and string.match(tostring(shown), "%d") or nil
+end
+
+-- Click one digit on the Keypad until its Readout shows the wanted char.
+-- Methods in order: fireclickdetector (x4) -> VIM screen click on the digit
+-- part (x3) -> VIM click on digit TextButtons. Verified each round.
+local function pressKeypadDigit(pad, w, want, force)
+	local digitW = pad:FindFirstChild("Digit" .. w)
+	if not digitW then return false end
+	local clicker = digitW:FindFirstChild("Digit") or digitW
+	local det = clicker:FindFirstChildOfClass("ClickDetector")
+		or digitW:FindFirstChildOfClass("ClickDetector", true)
+	local dw = digitW:IsA("BasePart") and digitW or digitW:FindFirstChildWhichIsA("BasePart", true)
+
+	for round = 1, 8 do
+		if not State.autowin and not force then return false end
+		if keypadSlotDigit(digitW) == want then return true end
+		if det and typeof(fireclickdetector) == "function" and round <= 4 then
+			pcall(fireclickdetector, det)
+		elseif dw and VIM then
+			screenClickPart(dw)
+		else
+			-- Last resort: digit TextButtons via VIM
+			local clicks, buttons = panelDigitControls(pad)
+			local btn = buttons[want]
+			if btn then clickButtonAt(btn) end
+		end
+		task.wait(0.35)
+	end
+	return keypadSlotDigit(digitW) == want
+end
+
 pressPanelDigits = function(panelModel, code, force)
-	-- Fast path: the real Keypad (Digit1-4, each with Readout + a "Digit"
-	-- child holding the ClickDetector). Click the right digit until its
-	-- Readout shows the wanted char, like the reference script does.
-	local pad = keypadModel()
-	if pad and typeof(fireclickdetector) == "function" then
-		local structural = true
+	local pad = keypadModel() or panelModel
+	if not pad then return end
+	-- Structural keypad (Digit1-4 + Readout): press + verify each digit.
+	local structural = pad:FindFirstChild("Digit1") ~= nil
+	if structural then
+		local allOk = true
 		for w = 1, #code do
 			if not State.autowin and not force then return end
 			local want = string.sub(code, w, w)
-			local digitW = pad:FindFirstChild("Digit" .. w)
-			if not digitW then structural = false break end
-			local clicker = digitW:FindFirstChild("Digit") or digitW
-			local det = clicker:FindFirstChildOfClass("ClickDetector")
-				or digitW:FindFirstChildOfClass("ClickDetector", true)
-			local readout = digitW:FindFirstChild("Readout", true)
-			if not det then structural = false break end
-			for _ = 1, 25 do
-				if not State.autowin and not force then return end
-				local shown = nil
-				if readout then
-					if readout:IsA("TextLabel") or readout:IsA("TextButton") then
-						pcall(function() shown = readout.Text end)
-					else
-						local lbl = readout:FindFirstChildWhichIsA("TextLabel", true) or readout:FindFirstChildWhichIsA("TextButton", true)
-						if lbl then pcall(function() shown = lbl.Text end) end
-					end
-				end
-				local shownDigit = shown and string.match(tostring(shown), "%d")
-				if shownDigit == want then break end
-				pcall(fireclickdetector, det, 0)
-				pcall(fireclickdetector, det)
-				task.wait(0.2)
+			if not pressKeypadDigit(pad, w, want, force) then
+				allOk = false
+				break
 			end
 		end
-		if structural then return end
+		if allOk then
+			firePromptsIn(pad)
+			return
+		end
 	end
 	-- Generic fallback: single-shot ClickDetectors, digit-part screen
 	-- clicks on the real Keypad, or VIM clicks on digit buttons.
-	local panel = panelModel or pad
-	if not panel then return end
-	local clicks, buttons = panelDigitControls(panel)
+	local clicks, buttons = panelDigitControls(pad)
 	for i = 1, #code do
 		if not State.autowin and not force then return end
 		local digit = string.sub(code, i, i)
 		local det = clicks[digit]
 		if det and typeof(fireclickdetector) == "function" then
-			pcall(fireclickdetector, det, 0)
 			pcall(fireclickdetector, det)
-		else
-			local dw = pad and pad:FindFirstChild("Digit" .. i) or nil
+		elseif VIM then
+			local dw = pad:FindFirstChild("Digit" .. i) or nil
 			local dp = dw and (dw:IsA("BasePart") and dw or dw:FindFirstChildWhichIsA("BasePart", true)) or nil
 			if dp then
 				screenClickPart(dp)
@@ -2512,6 +2322,7 @@ pressPanelDigits = function(panelModel, code, force)
 		end
 		task.wait(0.3)
 	end
+	firePromptsIn(pad)
 end
 
 -- Structural key grab: HiddenKey{i} > KeyPrompt. Teleports onto the
@@ -3025,48 +2836,11 @@ local function buildGui()
 		Callback = function(v)
 			State.colMonster = v
 			applyKindColors("monster")
-			refreshChamsIfOn()
 		end,
 	})
 	mSec:Paragraph({
 		Title = "How it works",
 		Content = "Monster ESP outlines the monster (workspace.VER) with name + distance. If it ever renames, enable NPC scan.",
-	})
-
-	local mChamSec = espMonster:Section({ Name = "Monster Material Chams", Side = 2 })
-	mChamSec:Toggle({
-		Name = "Material chams", Default = State.matChams, Flag = "ura_monster_matchams",
-		Callback = function(v)
-			applyMaterialChams(v)
-		end,
-	})
-	mChamSec:Dropdown({
-		Name = "Monster material",
-		Options = MATERIAL_OPTIONS,
-		Default = State.monsterMaterial,
-		Flag = "ura_monster_mat",
-		Callback = function(v)
-			State.monsterMaterial = v
-			refreshChamsIfOn()
-		end,
-	})
-	mChamSec:Slider({
-		Name = "Cham transparency", Min = 0, Max = 0.9, Default = State.chamTransp, Flag = "ura_monster_transp",
-		Callback = function(v)
-			State.chamTransp = v
-			refreshChamsIfOn()
-		end,
-	})
-	mChamSec:Toggle({
-		Name = "Tint with monster color", Default = State.chamFlat, Flag = "ura_monster_flat",
-		Callback = function(v)
-			State.chamFlat = v
-			refreshChamsIfOn()
-		end,
-	})
-	mChamSec:Paragraph({
-		Title = "Monster Materials",
-		Content = "Morph VER's body in real-time into Neon, Wood, Ground (Dirt), Grass, Mud, Glass, ForceField, Metal, DiamondPlate, Brick, etc.",
 	})
 
 	local iSec = espItems:Section({ Name = "Keys & Code", Side = 1 })
@@ -3082,7 +2856,6 @@ local function buildGui()
 		Callback = function(v)
 			State.colKey = v
 			applyKindColors("key")
-			refreshChamsIfOn()
 		end,
 	})
 	UiRefs.codesTgl = iSec:Toggle({
@@ -3097,7 +2870,6 @@ local function buildGui()
 		Callback = function(v)
 			State.colCode = v
 			applyKindColors("code")
-			refreshChamsIfOn()
 		end,
 	})
 	UiRefs.closetsTgl = iSec:Toggle({
@@ -3112,12 +2884,25 @@ local function buildGui()
 		Callback = function(v)
 			State.colCloset = v
 			applyKindColors("closet")
-			refreshChamsIfOn()
 		end,
 	})
 	iSec:Paragraph({
 		Title = "Code ESP",
 		Content = "Marks the NOTE / PAPER where the code IS (CodeNote > Printed > Digits is read directly). It never marks the keypad where you type it.",
+	})
+	UiRefs.playerEspTgl = iSec:Toggle({
+		Name = "Player ESP", Default = State.playerEsp, Flag = "ura_playeresp",
+		Callback = function(v)
+			State.playerEsp = v
+			if v then fullScan() else clearKind("player") end
+		end,
+	})
+	iSec:Colorpicker({
+		Name = "Player color", Default = State.colPlayer, Flag = "ura_colplayer",
+		Callback = function(v)
+			State.colPlayer = v
+			applyKindColors("player")
+		end,
 	})
 
 	local vSec = espItems:Section({ Name = "Style", Side = 2 })
@@ -3140,36 +2925,6 @@ local function buildGui()
 	vSec:Toggle({
 		Name = "Labels (name + dist)", Default = State.labels, Flag = "ura_labels",
 		Callback = function(v) State.labels = v end,
-	})
-	vSec:Toggle({
-		Name = "Material chams", Default = State.matChams, Flag = "ura_matchams",
-		Callback = function(v)
-			applyMaterialChams(v)
-		end,
-	})
-	vSec:Dropdown({
-		Name = "Monster material",
-		Options = MATERIAL_OPTIONS,
-		Default = State.monsterMaterial,
-		Flag = "ura_style_mat",
-		Callback = function(v)
-			State.monsterMaterial = v
-			refreshChamsIfOn()
-		end,
-	})
-	vSec:Slider({
-		Name = "Cham transparency", Min = 0, Max = 0.9, Default = State.chamTransp, Flag = "ura_chamtransp",
-		Callback = function(v)
-			State.chamTransp = v
-			refreshChamsIfOn()
-		end,
-	})
-	vSec:Toggle({
-		Name = "Flat cham color", Default = State.chamFlat, Flag = "ura_chamflat",
-		Callback = function(v)
-			State.chamFlat = v
-			refreshChamsIfOn()
-		end,
 	})
 	vSec:Slider({
 		Name = "Max distance", Min = 100, Max = 2000, Default = State.maxDist, Suffix = "m", Flag = "ura_maxdist",
@@ -3384,316 +3139,6 @@ local function buildGui()
 		end
 	end)
 	return window
-end
-
-local function visitLoop()
-	while State.visit and State.running do
-		local others = {}
-		for _, plr in ipairs(Players:GetPlayers()) do
-			if plr ~= LocalPlayer and plr.Character and plr.Character:FindFirstChild("HumanoidRootPart") then
-				others[#others + 1] = plr
-			end
-		end
-		if #others > 0 then
-			local target = others[math.random(#others)]
-			local hrp = myHRP()
-			if hrp and target.Character then
-				pcall(function() hrp.CFrame = target.Character.HumanoidRootPart.CFrame + Vector3.new(3, 0, 0) end)
-				notify("Visit", "Visiting " .. target.Name, "user")
-			end
-		end
-		local delay = State.visitDelay or 3
-		for i = 1, delay * 10 do
-			if not State.visit or not State.running then break end
-			task.wait(0.1)
-		end
-	end
-end
-
-local function getMonsterPart()
-	local ver = workspace:FindFirstChild("VER") or workspace:FindFirstChild("ver")
-	if not ver then
-		for inst, e in pairs(Tracked) do
-			if e.kind == "monster" and e.part and inWorkspace(inst) then
-				return e.part
-			end
-		end
-	end
-	if ver then
-		local _, part = resolveTarget(ver)
-		if part then return part end
-		if ver:IsA("BasePart") then return ver end
-		return ver:FindFirstChildWhichIsA("BasePart", true)
-	end
-	return nil
-end
-
-local function tpPlayerToMonster(target)
-	local mPart = getMonsterPart()
-	if not mPart then
-		notify("Troll", "Monster (VER) not found", "alert")
-		return false
-	end
-	if target and target.Character and target.Character:FindFirstChild("HumanoidRootPart") then
-		pcall(function()
-			target.Character.HumanoidRootPart.CFrame = mPart.CFrame + Vector3.new(0, 1, 0)
-		end)
-		return true
-	end
-	return false
-end
-
-local function tpAllPlayersToMonster()
-	local mPart = getMonsterPart()
-	if not mPart then
-		notify("Troll", "Monster (VER) not found", "alert")
-		return
-	end
-	local count = 0
-	for _, plr in ipairs(Players:GetPlayers()) do
-		if plr ~= LocalPlayer and plr.Character and plr.Character:FindFirstChild("HumanoidRootPart") then
-			pcall(function()
-				plr.Character.HumanoidRootPart.CFrame = mPart.CFrame + Vector3.new(0, 1, 0)
-			end)
-			count = count + 1
-		end
-	end
-	if count > 0 then
-		notify("Troll", "Teleported " .. count .. " player(s) to monster!", "skull")
-	else
-		notify("Troll", "No other players found", "info")
-	end
-end
-
-local function loopTpPlayersToMonster()
-	while State.loopTpToMonster and State.running do
-		local mPart = getMonsterPart()
-		if mPart then
-			for _, plr in ipairs(Players:GetPlayers()) do
-				if plr ~= LocalPlayer and plr.Character and plr.Character:FindFirstChild("HumanoidRootPart") then
-					pcall(function()
-						plr.Character.HumanoidRootPart.CFrame = mPart.CFrame + Vector3.new(0, 1, 0)
-					end)
-				end
-			end
-		end
-		task.wait(0.25)
-	end
-end
-
--- ===================== TROLL TAB =====================
-
-local function buildTrollTab()
-	local trollTab = Window:Tab({ Name = "Trolling", Icon = "skull" })
-	local trollMain = trollTab:SubTab({ Name = "Main", Icon = "user" })
-	
-	local trollSec = trollMain:Section({ Name = "Kill & Monster", Side = 1 })
-	trollSec:Button({
-		Name = "TP All Players to Monster (Kill All)",
-		Callback = function()
-			tpAllPlayersToMonster()
-		end,
-	})
-	trollSec:Button({
-		Name = "TP Random Player to Monster (Kill)",
-		Callback = function()
-			local others = {}
-			for _, plr in ipairs(Players:GetPlayers()) do
-				if plr ~= LocalPlayer and plr.Character and plr.Character:FindFirstChild("HumanoidRootPart") then
-					others[#others + 1] = plr
-				end
-			end
-			if #others == 0 then
-				notify("Troll", "No other players found", "info")
-				return
-			end
-			local target = others[math.random(#others)]
-			if tpPlayerToMonster(target) then
-				notify("Troll", "Teleported " .. target.Name .. " to monster!", "skull")
-			end
-		end,
-	})
-	trollSec:Toggle({
-		Name = "Loop TP Players to Monster", Default = State.loopTpToMonster, Flag = "ura_loopkill",
-		Callback = function(v)
-			State.loopTpToMonster = v
-			if v then task.spawn(loopTpPlayersToMonster) end
-		end,
-	})
-	trollSec:Button({
-		Name = "TP to Monster (VER)",
-		Callback = function()
-			local mPart = getMonsterPart()
-			if mPart then
-				local hrp = myHRP()
-				if hrp then
-					pcall(function() hrp.CFrame = mPart.CFrame + Vector3.new(0, 3, 0) end)
-					notify("Troll", "Teleported to monster", "skull")
-				end
-			else
-				notify("Troll", "VER not found in workspace", "alert")
-			end
-		end,
-	})
-	trollSec:Button({
-		Name = "TP Monster to Me",
-		Callback = function()
-			local hrp = myHRP()
-			if not hrp then
-				notify("Troll", "No character", "alert")
-				return
-			end
-			local dest = hrp.CFrame * CFrame.new(5, 0, 0)
-			local ver = workspace:FindFirstChild("VER") or workspace:FindFirstChild("ver")
-			if not ver then
-				for inst, e in pairs(Tracked) do
-					if e.kind == "monster" and inWorkspace(inst) then ver = inst break end
-				end
-			end
-			if not ver then
-				notify("Troll", "VER not found", "alert")
-				return
-			end
-			local moved = false
-			pcall(function()
-				if ver:IsA("Model") then
-					local mhrp = ver:FindFirstChild("HumanoidRootPart") or ver.PrimaryPart
-					if mhrp then
-						mhrp.CFrame = dest
-						moved = true
-					else
-						ver:PivotTo(dest)
-						moved = true
-					end
-				elseif ver:IsA("BasePart") then
-					ver.CFrame = dest
-					moved = true
-				end
-			end)
-			if not moved then
-				local mPart = getMonsterPart()
-				if mPart then
-					pcall(function() mPart.CFrame = dest end)
-					moved = true
-				end
-			end
-			if moved then
-				notify("Troll", "Monster teleported to you", "skull")
-			else
-				notify("Troll", "Failed to move monster", "alert")
-			end
-		end,
-	})
-	
-	local plrSec = trollMain:Section({ Name = "Players", Side = 2 })
-	UiRefs.playerEspTgl = plrSec:Toggle({
-		Name = "Player ESP", Default = State.playerEsp, Flag = "ura_playeresp",
-		Callback = function(v)
-			State.playerEsp = v
-			if v then fullScan() else clearKind("player") end
-		end,
-	})
-	plrSec:Colorpicker({
-		Name = "Player color", Default = State.colPlayer, Flag = "ura_colplayer",
-		Callback = function(v)
-			State.colPlayer = v
-			applyKindColors("player")
-		end,
-	})
-	plrSec:Toggle({
-		Name = "Visit loop (TP to each player)", Default = State.visit, Flag = "ura_visit",
-		Callback = function(v)
-			State.visit = v
-			if v then task.spawn(visitLoop) end
-		end,
-	})
-	plrSec:Slider({
-		Name = "Visit delay", Min = 1, Max = 10, Default = 3, Suffix = "s", Flag = "ura_visitdelay",
-		Callback = function(v) State.visitDelay = v end,
-	})
-	
-	local baitSec = trollMain:Section({ Name = "Bait", Side = 2 })
-	baitSec:Button({
-		Name = "TP Monster to All Players",
-		Callback = function()
-			local ver = workspace:FindFirstChild("VER") or workspace:FindFirstChild("ver")
-			if not ver then
-				for inst, e in pairs(Tracked) do
-					if e.kind == "monster" and inWorkspace(inst) then ver = inst break end
-				end
-			end
-			if not ver then
-				notify("Troll", "Monster (VER) not found", "alert")
-				return
-			end
-			local count = 0
-			for _, plr in ipairs(Players:GetPlayers()) do
-				if plr ~= LocalPlayer and plr.Character and plr.Character:FindFirstChild("HumanoidRootPart") then
-					local pcf = plr.Character.HumanoidRootPart.CFrame
-					pcall(function()
-						if ver:IsA("Model") then
-							local mhrp = ver:FindFirstChild("HumanoidRootPart") or ver.PrimaryPart
-							if mhrp then
-								mhrp.CFrame = pcf
-							else
-								ver:PivotTo(pcf)
-							end
-						elseif ver:IsA("BasePart") then
-							ver.CFrame = pcf
-						end
-					end)
-					count = count + 1
-				end
-			end
-			if count > 0 then
-				notify("Troll", "Monster teleported to " .. count .. " players!", "skull")
-			else
-				notify("Troll", "No other players found", "info")
-			end
-		end,
-	})
-	baitSec:Button({
-		Name = "Bait TP (random player to you)",
-		Callback = function()
-			local others = {}
-			for _, plr in ipairs(Players:GetPlayers()) do
-				if plr ~= LocalPlayer and plr.Character and plr.Character:FindFirstChild("HumanoidRootPart") then
-					others[#others + 1] = plr
-				end
-			end
-			if #others == 0 then
-				notify("Bait", "No other players found", "info")
-				return
-			end
-			local target = others[math.random(#others)]
-			local hrp = myHRP()
-			if hrp and target.Character and target.Character:FindFirstChild("HumanoidRootPart") then
-				pcall(function() target.Character.HumanoidRootPart.CFrame = hrp.CFrame + Vector3.new(3, 0, 0) end)
-				notify("Bait", "Teleported " .. target.Name .. " to you", "user")
-			end
-		end,
-	})
-	baitSec:Button({
-		Name = "Bait TP (you to random player)",
-		Callback = function()
-			local others = {}
-			for _, plr in ipairs(Players:GetPlayers()) do
-				if plr ~= LocalPlayer and plr.Character and plr.Character:FindFirstChild("HumanoidRootPart") then
-					others[#others + 1] = plr
-				end
-			end
-			if #others == 0 then
-				notify("Bait", "No other players found", "info")
-				return
-			end
-			local target = others[math.random(#others)]
-			local hrp = myHRP()
-			if hrp and target.Character and target.Character:FindFirstChild("HumanoidRootPart") then
-				pcall(function() hrp.CFrame = target.Character.HumanoidRootPart.CFrame + Vector3.new(3, 0, 0) end)
-				notify("Bait", "Teleported you to " .. target.Name, "user")
-			end
-		end,
-	})
 end
 
 -- ===================== STARTUP =====================
@@ -3951,7 +3396,6 @@ do
 end
 
 Window = buildGui()
-buildTrollTab()
 -- Save Zolar holders so Unload can fully destroy the GUI.
 pcall(function()
 	if getgenv and getgenv().Zolar then
@@ -3985,15 +3429,11 @@ trackConnection(RunService.Heartbeat:Connect(function(dt)
 		end
 	end
 	flyStep()
-	if State.fullbright or State.matChams then
+	if State.fullbright then
 		accFb = accFb + dt
 		if accFb >= 1 then
 			accFb = 0
-			if State.fullbright then enforceFullbright() end
-			-- Re-enforce material chams: the game may reset part properties
-			if State.matChams then
-				refreshChamsIfOn()
-			end
+			enforceFullbright()
 		end
 	end
 	-- ESP refresh timers
@@ -4108,14 +3548,11 @@ function Api.Unload()
 	State.autowin = false
 	State.autokeys = false
 	State.instacollect = false
-	State.loopTpToMonster = false
 	State.fly = false
 	State.noclip = false
 	State.fullbright = false
 	State.instantPrompt = false
 	State.godmode = false
-	State.matChams = false
-	applyMaterialChams(false, true)
 	for _, c in ipairs(GodConns) do
 		pcall(function() c:Disconnect() end)
 	end
