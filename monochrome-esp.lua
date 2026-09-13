@@ -477,75 +477,6 @@ local function boxSizeOf(target, part)
 	return Vector3.new(4, 6, 2)
 end
 
--- Calculate accurate 2D bounding box by projecting all 8 corners of 3D box
-local function calculateBox2D(target, part)
-	local sz = e.boxSize or e.part.Size
-	if not sz then
-		sz = boxSizeOf(target, part)
-	end
-
-	-- Get the center position (already have pPos from drawEntry scope)
-	-- We'll calculate the 8 corners of the 3D bounding box
-	local halfSize = sz / 2
-	local corners = {
-		-- Bottom face (z = -halfSize.Z)
-		pPos + Vector3.new(-halfSize.X, -halfSize.Y, -halfSize.Z),
-		pPos + Vector3.new( halfSize.X, -halfSize.Y, -halfSize.Z),
-		pPos + Vector3.new(-halfSize.X,  halfSize.Y, -halfSize.Z),
-		pPos + Vector3.new( halfSize.X,  halfSize.Y, -halfSize.Z),
-		-- Top face (z = +halfSize.Z)
-		pPos + Vector3.new(-halfSize.X, -halfSize.Y,  halfSize.Z),
-		pPos + Vector3.new( halfSize.X, -halfSize.Y,  halfSize.Z),
-		pPos + Vector3.new(-halfSize.X,  halfSize.Y,  halfSize.Z),
-		pPos + Vector3.new( halfSize.X,  halfSize.Y,  halfSize.Z),
-	}
-
-	-- Project all corners to viewport space
-	local screenPoints = {}
-	local minX, minY = math.huge, math.huge
-	local maxX, maxY = -math.huge, -math.huge
-	local anyInFront = false
-
-	for _, corner in ipairs(corners) do
-		local screenPoint, onScreen = Camera:WorldToViewportPoint(corner)
-		if onScreen and screenPoint.Z > 0 then
-			anyInFront = true
-			screenPoints[#screenPoints + 1] = screenPoint
-			if screenPoint.X < minX then minX = screenPoint.X end
-			if screenPoint.X > maxX then maxX = screenPoint.X end
-			if screenPoint.Y < minY then minY = screenPoint.Y end
-			if screenPoint.Y > maxY then maxY = screenPoint.Y end
-		end
-	end
-
-	if not anyInFront or #screenPoints == 0 then
-		return nil -- no visible corners
-	end
-
-	-- Add some padding to avoid thin boxes
-	local padding = 2
-	minX = math.max(0, minX - padding)
-	minY = math.max(0, minY - padding)
-	maxX = min(Camera.ViewportSize.X, maxX + padding)
-	maxY = min(Camera.ViewportSize.Y, maxY + padding)
-
-	local width = maxX - minX
-	local height = maxY - minY
-
-	-- Ensure minimum size
-	if width < 8 then width = 8 end
-	if height < 8 then height = 8 end
-
-	return {
-		x = minX,
-		y = minY,
-		width = width,
-		height = height,
-		centerX = (minX + maxX) / 2,
-		centerY = (minY + maxY) / 2
-	}
-end
-
 local EspFolder = nil
 local DrawScreenGui = nil
 
@@ -745,32 +676,15 @@ local function drawEntry(e, origin)
 		return
 	end
 
-	-- Calculate accurate 2D bounding box
-	local box2D = calculateBox2D(target, part)
-	if not box2D then
-		-- Fallback to old method if 2D calculation fails
-		local sz = e.boxSize or e.part.Size
-		local top = Camera:WorldToViewportPoint(pPos + Vector3.new(0, sz.Y / 2, 0))
-		local bot = Camera:WorldToViewportPoint(pPos - Vector3.new(0, sz.Y / 2, 0))
-		local h = math.clamp(math.abs(top.Y - bot.Y), 8, 1200)
-		local w = math.clamp(h * 0.58, 8, 800)
-		local cx, cy = cPos.X, (top.Y + bot.Y) / 2
-		local ty, by = cy - h / 2, cy + h / 2
-		local lx, rx = cx - w / 2, cx + w / 2
-		local cl = math.max(math.min(w, h) * 0.28, 4)
-	else
-		-- Use calculated 2D box
-		local lx = box2D.x
-		local rx = box2D.x + box2D.width
-		local ty = box2D.y
-		local by = box2D.y + box2D.height
-		local cx = box2D.centerX
-		local cy = box2D.centerY
-
-		-- Corner size: 20% of smaller dimension, min 3px, max 20px
-		local cl = math.max(math.min(box2D.width, box2D.height) * 0.2, 3)
-		cl = math.min(cl, 20)
-	end
+	local sz = e.boxSize or e.part.Size
+	local top = Camera:WorldToViewportPoint(pPos + Vector3.new(0, sz.Y / 2, 0))
+	local bot = Camera:WorldToViewportPoint(pPos - Vector3.new(0, sz.Y / 2, 0))
+	local h = math.clamp(math.abs(top.Y - bot.Y), 8, 1200)
+	local w = math.clamp(h * 0.58, 8, 800)
+	local cx, cy = cPos.X, (top.Y + bot.Y) / 2
+	local ty, by = cy - h / 2, cy + h / 2
+	local lx, rx = cx - w / 2, cx + w / 2
+	local cl = math.max(math.min(w, h) * 0.28, 4)
 	local col = kindColor(e.kind)
 
 	local pts = {
@@ -1514,75 +1428,6 @@ local function updateEntry(e, origin, maxDist, refreshDigits)
 			return true -- still pending
 		end
 	end
-	-- Calculate accurate 2D bounding box
-	local box2D = calculateBox2D(target, part)
-	if not box2D then
-		-- Fallback to old method if 2D calculation fails
-		local sz = e.boxSize or e.part.Size
-		local top = Camera:WorldToViewportPoint(pPos + Vector3.new(0, sz.Y / 2, 0))
-		local bot = Camera:WorldToViewportPoint(pPos - Vector3.new(0, sz.Y / 2, 0))
-		local h = math.clamp(math.abs(top.Y - bot.Y), 8, 1200)
-		local w = math.clamp(h * 0.58, 8, 800)
-		local cx, cy = cPos.X, (top.Y + bot.Y) / 2
-		local ty, by = cy - h / 2, cy + h / 2
-		local lx, rx = cx - w / 2, cx + w / 2
-		local cl = math.max(math.min(w, h) * 0.28, 4)
-
-		-- Universal 2D boxes & snaplines
-		if State.boxes or State.tracers then
-			ensureDraw(e)
-		end
-		if e.kind == "code" and refreshDigits then
-			if not refreshCodeDigits(e) then
-				return false
-			end
-		end
-		local pos = e.part.Position
-		local dist = (pos - origin).Magnitude
-		if dist > maxDist then
-			if e.hl then e.hl.Enabled = false end
-			if e.box then e.box.Visible = false end
-			if e.bb then e.bb.Enabled = false end
-			return true
-		end
-		local col = kindColor(e.kind)
-		if e.hl then
-			e.hl.Enabled = State.chams
-			e.hl.OutlineColor = col
-			e.hl.FillColor = col
-			e.hl.FillTransparency = (State.matChams and e.kind == "monster") and 0.85 or (State.matChams and State.chamTransp or 1)
-		end
-		if e.box then
-			e.box.Visible = State.matChams and (e.kind ~= "monster")
-			e.box.Color3 = col
-			e.box.Transparency = State.chamTransp
-			e.box.Size = (e.part and e.part.Size or Vector3.new(3, 5, 3)) + Vector3.new(0.04, 0.04, 0.04)
-		end
-		if e.bb then e.bb.Enabled = State.labels end
-		if e.stroke then pcall(function() e.stroke.Color = col end) end
-		if e.dot then pcall(function() e.dot.BackgroundColor3 = col end) end
-		local title = e.label
-		if e.kind == "code" then
-			title = e.digits and ("CODE " .. e.digits) or "NOTE"
-		end
-		if e.txt then
-			e.txt.Text = title .. " [" .. tostring(math.floor(dist)) .. "m]"
-		end
-		return true
-	end
-
-	-- Use calculated 2D box
-	local lx = box2D.x
-	local rx = box2D.x + box2D.width
-	local ty = box2D.y
-	local by = box2D.y + box2D.height
-	local cx = box2D.centerX
-	local cy = box2D.centerY
-
-	-- Corner size: 20% of smaller dimension, min 3px, max 20px
-	local cl = math.max(math.min(box2D.width, box2D.height) * 0.2, 3)
-	cl = math.min(cl, 20)
-
 	-- Universal 2D boxes & snaplines
 	if State.boxes or State.tracers then
 		ensureDraw(e)
@@ -1611,8 +1456,7 @@ local function updateEntry(e, origin, maxDist, refreshDigits)
 		e.box.Visible = State.matChams and (e.kind ~= "monster")
 		e.box.Color3 = col
 		e.box.Transparency = State.chamTransp
-		-- Box size matches the calculated 2D box (convert to Vector3 for BoxHandleAdornment)
-		e.box.Size = Vector3.new(box2D.width, box2D.height, 0.01) -- small Z for 2D box
+		e.box.Size = (e.part and e.part.Size or Vector3.new(3, 5, 3)) + Vector3.new(0.04, 0.04, 0.04)
 	end
 	if e.bb then e.bb.Enabled = State.labels end
 	if e.stroke then pcall(function() e.stroke.Color = col end) end
