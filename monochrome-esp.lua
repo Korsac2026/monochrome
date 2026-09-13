@@ -196,6 +196,7 @@ local State = {
 	matChams = false, -- 3D Box Adornment + Highlight Fill
 	chamTransp = 0.35, -- material cham transparency
 	chamFlat = true, -- tint chammed parts with the kind color
+	monsterMaterial = "Neon", -- Material for monster chams (Neon, Wood, Grass, Ground/Dirt, etc.)
 	noclip = false,
 	fly = false,
 	instacollect = false, -- grab keys the moment you walk into range
@@ -1029,7 +1030,51 @@ local function isKindEnabled(kind)
 end
 
 -- ===================== MATERIAL CHAMS =====================
-local ChamOrig = {} -- [BasePart] = {mat, color, transp}
+local MATERIAL_OPTIONS = {
+	"Neon",
+	"Wood",
+	"WoodPlanks",
+	"Ground (Dirt)",
+	"Grass",
+	"Mud",
+	"ForceField",
+	"Glass",
+	"Metal",
+	"DiamondPlate",
+	"Foil",
+	"Brick",
+	"Concrete",
+	"Granite",
+	"Marble",
+	"Ice",
+	"CorrodedMetal",
+	"Plastic",
+	"SmoothPlastic",
+}
+
+local MATERIAL_MAP = {
+	["Neon"] = Enum.Material.Neon,
+	["Wood"] = Enum.Material.Wood,
+	["WoodPlanks"] = Enum.Material.WoodPlanks,
+	["Ground (Dirt)"] = Enum.Material.Ground,
+	["Grass"] = Enum.Material.Grass,
+	["Mud"] = Enum.Material.Mud,
+	["ForceField"] = Enum.Material.ForceField,
+	["Glass"] = Enum.Material.Glass,
+	["Metal"] = Enum.Material.Metal,
+	["DiamondPlate"] = Enum.Material.DiamondPlate,
+	["Foil"] = Enum.Material.Foil,
+	["Brick"] = Enum.Material.Brick,
+	["Concrete"] = Enum.Material.Concrete,
+	["Granite"] = Enum.Material.Granite,
+	["Marble"] = Enum.Material.Marble,
+	["Ice"] = Enum.Material.Ice,
+	["CorrodedMetal"] = Enum.Material.CorrodedMetal,
+	["Plastic"] = Enum.Material.Plastic,
+	["SmoothPlastic"] = Enum.Material.SmoothPlastic,
+}
+
+local ChamOrig = {} -- [BasePart] = {mat, color, transp, textureId}
 
 local function chamParts(target)
 	local parts = {}
@@ -1047,21 +1092,44 @@ local function chamParts(target)
 	return parts
 end
 
-local function applyChamToTarget(target, col)
+local function applyChamToTarget(target, col, kind)
+	local chosenMat = Enum.Material.Neon
+	if kind == "monster" then
+		chosenMat = MATERIAL_MAP[State.monsterMaterial] or Enum.Material.Neon
+	else
+		chosenMat = Enum.Material.ForceField
+	end
+
 	for _, part in ipairs(chamParts(target)) do
 		if not ChamOrig[part] and not isOurEsp(part) then
 			local ok, m, c, t = pcall(function()
 				return part.Material, part.Color, part.Transparency
 			end)
 			if ok then
-				ChamOrig[part] = { mat = m, color = c, transp = t }
-				pcall(function()
-					part.Material = Enum.Material.ForceField
-					if State.chamFlat then part.Color = col end
-					part.Transparency = State.chamTransp
-				end)
+				local tex = nil
+				if part:IsA("MeshPart") then
+					pcall(function() tex = part.TextureID end)
+				end
+				ChamOrig[part] = { mat = m, color = c, transp = t, textureId = tex }
 			end
 		end
+
+		pcall(function()
+			part.Material = chosenMat
+			if State.chamFlat then
+				part.Color = col
+			end
+			part.Transparency = State.chamTransp
+			if part:IsA("MeshPart") then
+				if chosenMat ~= Enum.Material.ForceField and chosenMat ~= Enum.Material.SmoothPlastic then
+					part.TextureID = ""
+				else
+					if ChamOrig[part] and ChamOrig[part].textureId then
+						part.TextureID = ChamOrig[part].textureId
+					end
+				end
+			end
+		end)
 	end
 end
 
@@ -1075,6 +1143,9 @@ restoreChamForFn = function(target)
 					part.Material = o.mat
 					part.Color = o.color
 					part.Transparency = o.transp
+					if part:IsA("MeshPart") and o.textureId then
+						part.TextureID = o.textureId
+					end
 				end
 			end)
 		end
@@ -1089,18 +1160,18 @@ local function applyMaterialChams(on, quiet)
 			if e.hl then
 				pcall(function()
 					e.hl.FillColor = col
-					e.hl.FillTransparency = on and State.chamTransp or 1
+					e.hl.FillTransparency = (on and e.kind == "monster") and 0.85 or (on and State.chamTransp or 1)
 				end)
 			end
 			if e.box then
 				pcall(function()
 					e.box.Color3 = col
 					e.box.Transparency = State.chamTransp
-					e.box.Visible = on
+					e.box.Visible = on and (e.kind ~= "monster")
 				end)
 			end
 			if on and e.target then
-				applyChamToTarget(e.target, col)
+				applyChamToTarget(e.target, col, e.kind)
 			end
 		end
 	end
@@ -1112,6 +1183,9 @@ local function applyMaterialChams(on, quiet)
 					part.Material = o.mat
 					part.Color = o.color
 					part.Transparency = o.transp
+					if part:IsA("MeshPart") and o.textureId then
+						part.TextureID = o.textureId
+					end
 				end
 			end)
 		end
@@ -1120,7 +1194,7 @@ local function applyMaterialChams(on, quiet)
 		end
 	end
 	if on and not quiet then
-		notify("URANIUM", "Material chams ON", "sparkles")
+		notify("URANIUM", "Monster Material: " .. tostring(State.monsterMaterial), "sparkles")
 	end
 end
 
@@ -1157,6 +1231,9 @@ local function addEntry(inst)
 		digits = extractDigits(inst)
 	end
 	Tracked[inst] = { kind = kind, target = target, part = part, boxSize = boxSizeOf(target, part), hl = hl, bb = bb, txt = txt, box = box, stroke = stroke, dot = dot, draw = nil, digits = digits, label = label, root = inst }
+	if State.matChams and target then
+		applyChamToTarget(target, kindColor(kind), kind)
+	end
 end
 
 -- Force-mark a known object even when the generic scan skips it (e.g. a
@@ -1189,6 +1266,9 @@ local function forceEntry(inst, kind, label)
 		digits = extractDigits(inst)
 	end
 	Tracked[inst] = { kind = kind, target = target, part = part, boxSize = boxSizeOf(target, part), hl = hl, bb = bb, txt = txt, box = box, stroke = stroke, dot = dot, draw = nil, digits = digits, label = label, root = inst }
+	if State.matChams and target then
+		applyChamToTarget(target, kindColor(kind), kind)
+	end
 end
 
 -- Structural closet pass: Hide prompts, Hide click detectors, and closet models/parts
@@ -1369,10 +1449,10 @@ local function updateEntry(e, origin, maxDist, refreshDigits)
 		e.hl.Enabled = State.chams
 		e.hl.OutlineColor = col
 		e.hl.FillColor = col
-		e.hl.FillTransparency = State.matChams and State.chamTransp or 1
+		e.hl.FillTransparency = (State.matChams and e.kind == "monster") and 0.85 or (State.matChams and State.chamTransp or 1)
 	end
 	if e.box then
-		e.box.Visible = State.matChams
+		e.box.Visible = State.matChams and (e.kind ~= "monster")
 		e.box.Color3 = col
 		e.box.Transparency = State.chamTransp
 		e.box.Size = (e.part and e.part.Size or Vector3.new(3, 5, 3)) + Vector3.new(0.04, 0.04, 0.04)
@@ -2780,6 +2860,42 @@ local function buildGui()
 		Content = "Monster ESP outlines the monster (workspace.VER) with name + distance. If it ever renames, enable NPC scan.",
 	})
 
+	local mChamSec = espMonster:Section({ Name = "Monster Material Chams", Side = 2 })
+	mChamSec:Toggle({
+		Name = "Material chams", Default = State.matChams, Flag = "ura_monster_matchams",
+		Callback = function(v)
+			applyMaterialChams(v)
+		end,
+	})
+	mChamSec:Dropdown({
+		Name = "Monster material",
+		Options = MATERIAL_OPTIONS,
+		Default = State.monsterMaterial,
+		Flag = "ura_monster_mat",
+		Callback = function(v)
+			State.monsterMaterial = v
+			refreshChamsIfOn()
+		end,
+	})
+	mChamSec:Slider({
+		Name = "Cham transparency", Min = 0, Max = 0.9, Default = State.chamTransp, Flag = "ura_monster_transp",
+		Callback = function(v)
+			State.chamTransp = v
+			refreshChamsIfOn()
+		end,
+	})
+	mChamSec:Toggle({
+		Name = "Tint with monster color", Default = State.chamFlat, Flag = "ura_monster_flat",
+		Callback = function(v)
+			State.chamFlat = v
+			refreshChamsIfOn()
+		end,
+	})
+	mChamSec:Paragraph({
+		Title = "Monster Materials",
+		Content = "Morph VER's body in real-time into Neon, Wood, Ground (Dirt), Grass, Mud, Glass, ForceField, Metal, DiamondPlate, Brick, etc.",
+	})
+
 	local iSec = espItems:Section({ Name = "Keys & Code", Side = 1 })
 	UiRefs.keysTgl = iSec:Toggle({
 		Name = "Key ESP", Default = State.keys, Flag = "ura_keys",
@@ -2856,6 +2972,16 @@ local function buildGui()
 		Name = "Material chams", Default = State.matChams, Flag = "ura_matchams",
 		Callback = function(v)
 			applyMaterialChams(v)
+		end,
+	})
+	vSec:Dropdown({
+		Name = "Monster material",
+		Options = MATERIAL_OPTIONS,
+		Default = State.monsterMaterial,
+		Flag = "ura_style_mat",
+		Callback = function(v)
+			State.monsterMaterial = v
+			refreshChamsIfOn()
 		end,
 	})
 	vSec:Slider({
