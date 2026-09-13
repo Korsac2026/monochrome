@@ -148,13 +148,29 @@ local PLANK_NAMES = { "plank", "tabla", "tablon", "pry", "palanca", "board", "ma
 local DEADBOLT_NAMES = { "deadbolt", "cerrojo", "exit", "salida", "door", "puerta" }
 -- Words that must never be treated as exit targets (hiding spots)
 local NEVER_EXIT = { "closet", "armario", "hide", "esconder" }
+-- Exact map structure (MONOCHROME): workspace.monochrome holds HiddenKey1-4
+-- (Key > KeyPromptPoint > KeyPrompt), CodeNote (Printed > Digits, plain
+-- TextLabel, NOT a SurfaceGui), Keypad (Digit1-4 each with Readout plus a
+-- "Digit" child holding the ClickDetector), door locks (Cube.028/035/031/033
+-- > LockPromptPoint > LockPrompt) and the elevator (Cylinder.002 >
+-- ElevatorPromptPoint > ElevatorPrompt). The monster is workspace.VER.
+local MAP_NAME = "monochrome"
+local HIDDEN_KEY_PREFIX = "HiddenKey"
+local HIDDEN_KEYS_TOTAL = 4
+local LOCK_PARTS = { "Cube.028", "Cube.035", "Cube.031", "Cube.033" }
+local ELEVATOR_PART = "Cylinder.002"
+-- Closets / hiding spots
+local CLOSET_NAMES = { "closet", "armario", "ropero", "wardrobe", "locker", "hideout", "hiding" }
+local HIDE_WORDS = { "hide", "esconder", "esconderse", "ocultar" }
 
 local State = {
 	running = true,
 	monster = true,
 	keys = true,
 	codes = true,
+	closets = true, -- hiding spots (closet/wardrobe/locker + Hide prompts)
 	npcScan = false, -- mark ANY non-player humanoid as monster
+	godmode = false, -- infinite lives attempt (client-side locks)
 	chams = true, -- highlight outlines
 	boxes = true, -- 2D corner boxes (needs Drawing)
 	tracers = false, -- snaplines (needs Drawing)
@@ -173,6 +189,7 @@ local State = {
 	colMonster = WHITE,
 	colKey = WHITE,
 	colCode = WHITE,
+	colCloset = WHITE,
 }
 
 if not HasDrawing then
@@ -280,12 +297,14 @@ end
 local function kindColor(kind)
 	if kind == "monster" then return State.colMonster end
 	if kind == "key" then return State.colKey end
+	if kind == "closet" then return State.colCloset end
 	return State.colCode
 end
 
 local function kindTitle(kind)
 	if kind == "monster" then return "MONSTER" end
 	if kind == "key" then return "KEY" end
+	if kind == "closet" then return "CLOSET" end
 	return "NOTE"
 end
 
@@ -304,6 +323,11 @@ local function classify(inst)
 
 	local name = lowerName(inst)
 
+	-- Monster: exact game name (workspace.VER). Exact match first: a plain
+	-- "ver" substring check would false-positive on "server"/"lever".
+	if name == "ver" then
+		return "monster", "MONSTER"
+	end
 	-- Monster: by name
 	if (inst:IsA("Model") or inst:IsA("BasePart")) and matchesAny(name, MONSTER_NAMES) then
 		return "monster", "MONSTER"
@@ -316,8 +340,12 @@ local function classify(inst)
 	if State.npcScan and inst:IsA("Model") and not isPlayerCharacter(inst) and hasHumanoid(inst) then
 		return "monster", "MONSTER"
 	end
-	-- Keys
-	if matchesAny(name, KEY_NAMES) then
+	-- Closets / hiding spots (checked before keys/code so lockers count as hideouts)
+	if matchesAny(name, CLOSET_NAMES) then
+		return "closet", "CLOSET"
+	end
+	-- Keys (entry objects like the "keypad" excluded: "keypad" contains "key")
+	if matchesAny(name, KEY_NAMES) and not isEntryObject(inst) then
 		return "key", "KEY"
 	end
 	-- Code location: paper/note-like objects (handwritten code lives here).
@@ -325,6 +353,22 @@ local function classify(inst)
 	if matchesAny(name, NOTE_NAMES) and not isEntryObject(inst) then
 		return "code", "NOTE"
 	end
+	return nil
+end
+
+-- A "hide in here" prompt means its host is a closet/hiding spot.
+local function hidePromptHost(prompt)
+	if typeof(prompt) ~= "Instance" or not prompt:IsA("ProximityPrompt") then return nil end
+	local s = lowerName(prompt) .. " " .. tostring(prompt.ObjectText or ""):lower() .. " " .. tostring(prompt.ActionText or ""):lower()
+	local hit = false
+	for i = 1, #HIDE_WORDS do
+		if string.find(s, HIDE_WORDS[i], 1, true) then hit = true break end
+	end
+	if not hit then return nil end
+	local host = prompt.Parent
+	if not host or isOurEsp(host) then return nil end
+	if host:IsA("BasePart") then return host end
+	if host:IsA("Model") or host:IsA("Tool") then return host end
 	return nil
 end
 
@@ -619,6 +663,15 @@ local function scanCodeTexts()
 				end
 			end
 		elseif d:IsA("ProximityPrompt") and not Tracked[d] then
+			-- A "hide" prompt marks its host as a closet first.
+			local hideHost = hidePromptHost(d)
+			if hideHost and not Tracked[hideHost] and State.closets then
+				local target, part = resolveTarget(hideHost)
+				if target and part then
+					local hl, bb, txt = makeEspObjects(target, part)
+					Tracked[hideHost] = { kind = "closet", target = target, part = part, boxSize = boxSizeOf(target, part), hl = hl, bb = bb, txt = txt, digits = nil, label = "CLOSET", root = hideHost }
+				end
+			end
 			-- A "read this" prompt marks its host as a code location.
 			local host = readPromptHost(d)
 			if host and not Tracked[host] then
@@ -651,16 +704,32 @@ local function scanCodeTexts()
 	end
 end
 
--- First 4-digit code found (preferred), else any digit string.
+-- First 4-digit code found: CodeNote entries first (the real paper),
+-- then anything else. Falls back to any digit string.
+local function rootIsCodeNote(e)
+	local n = e.root
+	for i = 1, 3 do
+		if typeof(n) ~= "Instance" then break end
+		local nm = lowerName(n)
+		if nm == "codenote" or nm == "code note" then return true end
+		n = n.Parent
+	end
+	return false
+end
+
 local function getFoundCode()
-	local fallback = nil
+	local fallback, noteFallback = nil, nil
 	for _, e in pairs(Tracked) do
 		if e.kind == "code" and e.digits then
-			if #e.digits == 4 then return e.digits end
-			if not fallback then fallback = e.digits end
+			if #e.digits == 4 then
+				if rootIsCodeNote(e) then return e.digits end
+				if not fallback then fallback = e.digits end
+			elseif not noteFallback then
+				noteFallback = e.digits
+			end
 		end
 	end
-	return fallback
+	return fallback or noteFallback
 end
 
 -- PlayerGui scan: reading the note pops the code into player UI.
@@ -709,6 +778,7 @@ local function isKindEnabled(kind)
 	if kind == "monster" then return State.monster end
 	if kind == "key" then return State.keys end
 	if kind == "code" then return State.codes end
+	if kind == "closet" then return State.closets end
 	return false
 end
 
@@ -732,6 +802,55 @@ local function addEntry(inst)
 	Tracked[inst] = { kind = kind, target = target, part = part, boxSize = boxSizeOf(target, part), hl = hl, bb = bb, txt = txt, draw = nil, digits = digits, label = label, root = inst }
 end
 
+-- Force-mark a known object even when the generic scan skips it (e.g. a
+-- BasePart nested inside a non-matching Model like the map folder).
+local function forceEntry(inst, kind, label)
+	if typeof(inst) ~= "Instance" then return end
+	if Tracked[inst] or not inWorkspace(inst) or isOurEsp(inst) then return end
+	if not isKindEnabled(kind) then return end
+	if kind == "code" and isEntryObject(inst) then return end
+	local target, part = resolveTarget(inst)
+	if not target or not part then
+		Tracked[inst] = { kind = kind, target = nil, part = nil, boxSize = nil, hl = nil, bb = nil, txt = nil, draw = nil, digits = nil, label = label, root = inst }
+		return
+	end
+	local hl, bb, txt = makeEspObjects(target, part)
+	local digits = nil
+	if kind == "code" then
+		digits = extractDigits(inst)
+	end
+	Tracked[inst] = { kind = kind, target = target, part = part, boxSize = boxSizeOf(target, part), hl = hl, bb = bb, txt = txt, draw = nil, digits = digits, label = label, root = inst }
+end
+
+-- Structural pass over the real map: CodeNote (Printed > Digits is a plain
+-- TextLabel, not a SurfaceGui, so the text scan can never resolve its part)
+-- and HiddenKey folders (classify ignores Folder instances).
+local function scanStructural()
+	local map = workspace:FindFirstChild(MAP_NAME)
+	local scope = map or workspace
+	if State.codes then
+		for _, child in ipairs(scope:GetChildren()) do
+			local n = lowerName(child)
+			if (n == "codenote" or n == "code note") and not Tracked[child] then
+				pcall(forceEntry, child, "code", "NOTE")
+			end
+		end
+	end
+	if State.keys then
+		for i = 1, HIDDEN_KEYS_TOTAL do
+			local hk = scope:FindFirstChild(HIDDEN_KEY_PREFIX .. i)
+			if hk and not Tracked[hk] then
+				local keyPart = hk:FindFirstChildWhichIsA("BasePart", true)
+				if keyPart then
+					pcall(forceEntry, keyPart, "key", "KEY")
+				else
+					pcall(forceEntry, hk, "key", "KEY")
+				end
+			end
+		end
+	end
+end
+
 local function fullScan()
 	for _, inst in ipairs(workspace:GetDescendants()) do
 		if inst:IsA("Model") or inst:IsA("Tool") then
@@ -740,6 +859,7 @@ local function fullScan()
 			pcall(addEntry, inst)
 		end
 	end
+	pcall(scanStructural)
 	scanCodeTexts()
 end
 
@@ -759,15 +879,16 @@ local function setStatus(s)
 end
 
 local function countTargets()
-	local m, k, c = 0, 0, 0
+	local m, k, c, h = 0, 0, 0, 0
 	for _, e in pairs(Tracked) do
 		if e.hl then
 			if e.kind == "monster" then m = m + 1
 			elseif e.kind == "key" then k = k + 1
-			elseif e.kind == "code" then c = c + 1 end
+			elseif e.kind == "code" then c = c + 1
+			elseif e.kind == "closet" then h = h + 1 end
 		end
 	end
-	return m, k, c
+	return m, k, c, h
 end
 
 local function applyKindColors(kind)
@@ -1068,6 +1189,100 @@ local function applyInstantPrompt(on)
 end
 
 -- Simulate holding E (fallback when fireproximityprompt is missing).
+-- ===================== INFINITE LIVES =====================
+-- No server exploit ("CVE") exists in the client-readable code: the other
+-- script only touches prompts/click detectors, which the server validates.
+-- So this locks everything client-side instead: Humanoid health pinned to
+-- max (kills fizzle when damage is applied through the client) plus any
+-- lives counter (life/lives/vida values in player/character/UI) pinned to
+-- 999. Works fully when the game trusts the client; when the server is
+-- authoritative the monster still can't finish you while noclip/fly is on.
+local GOD_LIVES = 999
+local LIFE_VALUE_WORDS = { "life", "lives", "live", "vidas", "vida" }
+local GodConns = {}
+
+local function livesValueCandidates()
+	local out = {}
+	local function consider(container)
+		if typeof(container) ~= "Instance" then return end
+		local ok, descs = pcall(function() return container:GetDescendants() end)
+		if not ok then return end
+		for i = 1, #descs do
+			local d = descs[i]
+			if (d:IsA("IntValue") or d:IsA("NumberValue")) and not isOurEsp(d) then
+				local n = lowerName(d)
+				for j = 1, #LIFE_VALUE_WORDS do
+					if string.find(n, LIFE_VALUE_WORDS[j], 1, true) then
+						out[#out + 1] = d
+						break
+					end
+				end
+			end
+		end
+	end
+	consider(LocalPlayer)
+	local char = myCharacter()
+	if char then consider(char) end
+	local pg = LocalPlayer and LocalPlayer:FindFirstChildOfClass("PlayerGui") or nil
+	if pg then consider(pg) end
+	return out
+end
+
+local function lockLivesValue(v)
+	pcall(function()
+		if typeof(v.Value) == "number" and v.Value < GOD_LIVES then
+			v.Value = GOD_LIVES
+		end
+	end)
+	GodConns[#GodConns + 1] = v.Changed:Connect(function()
+		if not State.godmode or not State.running then return end
+		pcall(function()
+			if typeof(v.Value) == "number" and v.Value < GOD_LIVES then
+				v.Value = GOD_LIVES
+			end
+		end)
+	end)
+end
+
+local function armGodHumanoid(hum)
+	if typeof(hum) ~= "Instance" then return end
+	pcall(function()
+		hum.BreakJointsOnDeath = false
+		if hum.Health < hum.MaxHealth then
+			hum.Health = hum.MaxHealth
+		end
+	end)
+	GodConns[#GodConns + 1] = hum.HealthChanged:Connect(function(hp)
+		if not State.godmode or not State.running then return end
+		if hum.Parent and hp < hum.MaxHealth then
+			pcall(function() hum.Health = hum.MaxHealth end)
+		end
+	end)
+end
+
+local function applyGodmode(on)
+	State.godmode = on
+	for _, c in ipairs(GodConns) do
+		pcall(function() c:Disconnect() end)
+	end
+	GodConns = {}
+	if not on then return end
+	armGodHumanoid(myHumanoid())
+	for _, v in ipairs(livesValueCandidates()) do
+		lockLivesValue(v)
+	end
+	GodConns[#GodConns + 1] = LocalPlayer.CharacterAdded:Connect(function(char)
+		if not State.godmode then return end
+		task.wait(1)
+		if not State.godmode or not State.running then return end
+		armGodHumanoid(char:FindFirstChildOfClass("Humanoid"))
+		for _, v in ipairs(livesValueCandidates()) do
+			lockLivesValue(v)
+		end
+	end)
+	notify("URANIUM", "Infinite Lives ON (health + lives locked)", "heart")
+end
+
 local function pressE(holdTime)
 	if not VIM then return false end
 	holdTime = holdTime or 0.3
@@ -1096,13 +1311,36 @@ local function vimClick(x, y)
 	return true
 end
 
--- Fire one prompt: executor fast-path, else real E-hold in range.
+-- Loosen a prompt before firing (same trick as the reference script):
+-- no line-of-sight needed, huge activation range.
+local function prepPrompt(prompt)
+	pcall(function()
+		prompt.RequiresLineOfSight = false
+		if (prompt.MaxActivationDistance or 0) < 500 then
+			prompt.MaxActivationDistance = 5000
+		end
+	end)
+end
+
+-- Fire one prompt: executor fast-path, then the prompt's own hold
+-- simulation (InputHoldBegin/End), else a real E-hold in range.
 local function firePrompt(prompt)
 	if typeof(prompt) ~= "Instance" or not prompt:IsA("ProximityPrompt") then return end
 	if not prompt.Enabled then return end
 	if typeof(fireproximityprompt) == "function" then
 		pcall(fireproximityprompt, prompt)
 		task.wait((prompt.HoldDuration or 0) + 0.3)
+		return
+	end
+	local began = false
+	pcall(function()
+		prompt:InputHoldBegin()
+		began = true
+	end)
+	if began then
+		task.wait((prompt.HoldDuration or 0) + 0.2)
+		pcall(function() prompt:InputHoldEnd() end)
+		task.wait(0.3)
 		return
 	end
 	pressE((prompt.HoldDuration or 0) + 0.4)
@@ -1114,6 +1352,7 @@ local function firePromptsIn(model)
 	if not ok then return end
 	for i = 1, #descs do
 		if descs[i]:IsA("ProximityPrompt") then
+			prepPrompt(descs[i])
 			firePrompt(descs[i])
 		end
 	end
@@ -1149,6 +1388,7 @@ end
 -- Stand on a prompt (inside its activation range) and use it.
 local function usePrompt(prompt)
 	if not State.autowin then return false end
+	prepPrompt(prompt)
 	local part = promptRootPart(prompt)
 	if part then
 		local range = math.max(2, math.min((prompt.MaxActivationDistance or 10) - 2, 12))
@@ -1163,13 +1403,20 @@ end
 local function countKeysHeld()
 	local n = 0
 	local function scan(container)
+		if typeof(container) ~= "Instance" then return end
 		for _, t in ipairs(container:GetChildren()) do
 			if t:IsA("Tool") and matchesAny(lowerName(t), KEY_NAMES) then
 				n = n + 1
+			elseif (t:IsA("IntValue") or t:IsA("NumberValue")) and string.find(lowerName(t), "key", 1, true) then
+				-- server-style counter (e.g. leaderstats "Keys")
+				local v = tonumber(t.Value) or 0
+				if v > 0 then n = n + v end
 			end
 		end
 	end
 	pcall(scan, LocalPlayer.Backpack)
+	pcall(scan, LocalPlayer:FindFirstChild("leaderstats"))
+	pcall(scan, LocalPlayer)
 	local char = myCharacter()
 	if char then pcall(scan, char) end
 	return n
@@ -1232,7 +1479,86 @@ local function scanPrompts(nameList, excludeList, limit)
 	return out
 end
 
--- Elevator / code entry panel (internal navigation only).
+-- ===================== MAP STRUCTURE (MONOCHROME) =====================
+
+local function mapRoot()
+	local m = workspace:FindFirstChild(MAP_NAME)
+	if m then return m end
+	return workspace
+end
+
+local function hiddenKeyFolder(i)
+	local map = mapRoot()
+	local hk = map:FindFirstChild(HIDDEN_KEY_PREFIX .. i)
+	if hk then return hk end
+	if map ~= workspace then
+		hk = workspace:FindFirstChild(HIDDEN_KEY_PREFIX .. i, true)
+		if hk then return hk end
+	end
+	return nil
+end
+
+local function keyPromptIn(hk)
+	if typeof(hk) ~= "Instance" then return nil end
+	local p = hk:FindFirstChild("KeyPrompt", true)
+	if p and p:IsA("ProximityPrompt") then return p end
+	return nil
+end
+
+local function keyPartIn(hk)
+	if typeof(hk) ~= "Instance" then return nil end
+	if hk:IsA("BasePart") then return hk end
+	return hk:FindFirstChildWhichIsA("BasePart", true)
+end
+
+local function lockPromptByName(partName)
+	local map = mapRoot()
+	local holder = map:FindFirstChild(partName) or workspace:FindFirstChild(partName, true)
+	if not holder then return nil end
+	local p = holder:FindFirstChild("LockPrompt", true)
+	if p and p:IsA("ProximityPrompt") then return p end
+	return nil
+end
+
+local function elevatorPrompt()
+	local map = mapRoot()
+	local holder = map:FindFirstChild(ELEVATOR_PART) or workspace:FindFirstChild(ELEVATOR_PART, true)
+	if not holder then return nil end
+	local p = holder:FindFirstChild("ElevatorPrompt", true)
+	if p and p:IsA("ProximityPrompt") then return p end
+	return nil
+end
+
+local function keypadModel()
+	local map = mapRoot()
+	local k = map:FindFirstChild("Keypad")
+	if k then return k end
+	for _, inst in ipairs(workspace:GetDescendants()) do
+		if inst:IsA("Model") and lowerName(inst) == "keypad" then
+			return inst
+		end
+	end
+	return nil
+end
+
+-- Direct read of the real paper: CodeNote > Printed > Digits (plain
+-- TextLabel, no SurfaceGui). Returns the digit string or nil.
+local function readCodeNoteDirect()
+	local note = mapRoot():FindFirstChild("CodeNote")
+	if not note then
+		note = workspace:FindFirstChild("CodeNote", true)
+	end
+	if not note then return nil end
+	local printed = note:FindFirstChild("Printed")
+	local digitsObj = (printed and printed:FindFirstChild("Digits"))
+		or note:FindFirstChild("Digits", true)
+	if digitsObj and (digitsObj:IsA("TextLabel") or digitsObj:IsA("TextButton")) then
+		local m = nil
+		pcall(function() m = digitsInString(digitsObj.Text) end)
+		if m then return m end
+	end
+	return extractDigits(note)
+end
 local function findEntryPanel()
 	for _, inst in ipairs(workspace:GetDescendants()) do
 		if inst:IsA("Model") or inst:IsA("BasePart") then
@@ -1292,8 +1618,11 @@ local function clickButtonAt(btn)
 	return vimClick(cx, cy)
 end
 
--- Read every NOTE (fires Read prompts) + UI + world scan. Returns 4-digit code or nil.
+-- Read the real paper first (CodeNote > Printed > Digits), then tracked
+-- marks, then every NOTE (fires Read prompts) + UI + world scan.
 local function acquireCode()
+	local direct = readCodeNoteDirect()
+	if direct and #direct == 4 then return direct end
 	local code = getFoundCode()
 	if code and #code == 4 then return code end
 	for _, e in pairs(Tracked) do
@@ -1304,8 +1633,9 @@ local function acquireCode()
 	task.wait(0.6)
 	code = scanPlayerGuiForCode() or getFoundCode()
 	if code then return code end
+	if direct then return direct end
 	scanCodeTexts()
-	return getFoundCode()
+	return getFoundCode() or readCodeNoteDirect()
 end
 
 local function enterCodeAtPanel(panel, code)
@@ -1316,7 +1646,39 @@ local function enterCodeAtPanel(panel, code)
 end
 
 local function pressPanelDigits(panelModel, code)
-	local clicks, buttons = panelDigitControls(panelModel)
+	-- Fast path: the real Keypad (Digit1-4, each with Readout + a "Digit"
+	-- child holding the ClickDetector). Click the right digit until its
+	-- Readout shows the wanted char, like the reference script does.
+	local pad = keypadModel()
+	if pad and typeof(fireclickdetector) == "function" then
+		local structural = true
+		for w = 1, #code do
+			if not State.autowin then return end
+			local want = string.sub(code, w, w)
+			local digitW = pad:FindFirstChild("Digit" .. w)
+			if not digitW then structural = false break end
+			local clicker = digitW:FindFirstChild("Digit") or digitW
+			local det = clicker:FindFirstChildOfClass("ClickDetector")
+				or digitW:FindFirstChildOfClass("ClickDetector", true)
+			local readout = digitW:FindFirstChild("Readout", true)
+			if not det then structural = false break end
+			for _ = 1, 20 do
+				if not State.autowin then return end
+				local shown = nil
+				if readout and (readout:IsA("TextLabel") or readout:IsA("TextButton")) then
+					pcall(function() shown = readout.Text end)
+				end
+				if shown == want then break end
+				pcall(fireclickdetector, det)
+				task.wait(0.35)
+			end
+		end
+		if structural then return end
+	end
+	-- Generic fallback: single-shot ClickDetectors / VIM screen buttons.
+	local panel = panelModel or pad
+	if not panel then return end
+	local clicks, buttons = panelDigitControls(panel)
 	for i = 1, #code do
 		if not State.autowin then return end
 		local digit = string.sub(code, i, i)
@@ -1333,6 +1695,43 @@ local function pressPanelDigits(panelModel, code)
 		end
 		task.wait(0.45)
 	end
+end
+
+-- Structural key grab: HiddenKey{i} > KeyPrompt. Teleports onto the
+-- prompt part, fires, and verifies via inventory count or removal.
+local function grabHiddenKey(hk)
+	if typeof(hk) ~= "Instance" then return false end
+	local before = countKeysHeld()
+	local prompt = keyPromptIn(hk)
+	local part = keyPartIn(hk)
+	if not prompt or not part then return false end
+	prepPrompt(prompt)
+	local hrp = myHRP()
+	local home = (hrp and hrp.CFrame) or nil
+	for _ = 1, 4 do
+		if not State.autowin or not State.running then return false end
+		if not inWorkspace(hk) then return true end
+		waitRespawn()
+		if not State.autowin then return false end
+		hrp = myHRP()
+		if hrp and inWorkspace(part) then
+			pcall(function() hrp.CFrame = part.CFrame + Vector3.new(0, 1, 4) end)
+			task.wait(0.5)
+		end
+		if not State.autowin then return false end
+		firePrompt(prompt)
+		task.wait(0.6)
+		pressE(0.4)
+		task.wait(0.3)
+		if not inWorkspace(hk) or countKeysHeld() > before then
+			hrp = myHRP()
+			if hrp and home then pcall(function() hrp.CFrame = home end) end
+			return true
+		end
+	end
+	hrp = myHRP()
+	if hrp and home then pcall(function() hrp.CFrame = home end) end
+	return (not inWorkspace(hk)) or countKeysHeld() > before
 end
 
 local function grabKey(inst)
@@ -1406,12 +1805,24 @@ local function autoWinLoop()
 		end
 		task.wait(0.5)
 
-		-- Phase 2: collect the 4 keys
+		-- Phase 2: collect the 4 keys (structural HiddenKey1-4 first,
+		-- verified with the inventory counter)
 		setStatus("AUTO WIN 3/5: collecting keys (" .. countKeysHeld() .. "/" .. KEYS_NEEDED .. ")")
 		notify("Auto Win", "Phase 3/5: collecting keys", "key")
-		do
+		for i = 1, HIDDEN_KEYS_TOTAL do
+			if not State.autowin then break end
+			if countKeysHeld() >= KEYS_NEEDED then break end
+			local hk = hiddenKeyFolder(i)
+			if hk and inWorkspace(hk) then
+				grabHiddenKey(hk)
+				setStatus("AUTO WIN 3/5: collecting keys (" .. countKeysHeld() .. "/" .. KEYS_NEEDED .. ")")
+			end
+			task.wait(0.15)
+		end
+		-- Fallback sweep for any key the structural pass missed
+		if State.autowin and State.running and countKeysHeld() < KEYS_NEEDED then
 			local guard = 0
-			while State.autowin and State.running and countKeysHeld() < KEYS_NEEDED and guard < 30 do
+			while State.autowin and State.running and countKeysHeld() < KEYS_NEEDED and guard < 15 do
 				guard = guard + 1
 				waitRespawn()
 				if not State.autowin then break end
@@ -1428,9 +1839,25 @@ local function autoWinLoop()
 		end
 		if not State.autowin then break end
 
-		-- Phase 3: deadbolts / exit
+		-- Phase 3: door locks (structural Cube.* prompts first)
 		setStatus("AUTO WIN 4/5: opening deadbolts (" .. countKeysHeld() .. "/" .. KEYS_NEEDED .. " keys)")
 		notify("Auto Win", "Phase 4/5: opening exit", "lock-open")
+		for _, lname in ipairs(LOCK_PARTS) do
+			if not State.autowin then break end
+			waitRespawn()
+			if not State.autowin then break end
+			local lp = lockPromptByName(lname)
+			if lp then
+				prepPrompt(lp)
+				local part = promptRootPart(lp)
+				if part then instantTP(part.Position + Vector3.new(0, 3, 0)) end
+				if not State.autowin then break end
+				firePrompt(lp)
+				task.wait(0.3)
+				firePrompt(lp)
+				task.wait(0.25)
+			end
+		end
 		for _, t in ipairs(scanPrompts(DEADBOLT_NAMES, NEVER_EXIT, 20)) do
 			if not State.autowin then break end
 			waitRespawn()
@@ -1442,9 +1869,19 @@ local function autoWinLoop()
 		end
 		if not State.autowin then break end
 
-		-- Phase 4: elevator panel + code
+		-- Phase 4: elevator panel + code (structural Keypad + Elevator first)
 		local code = acquireCode()
-		local panel, panelPos = findEntryPanel()
+		local panel, panelPos = nil, nil
+		do
+			local pad = keypadModel()
+			if pad then
+				local _, p = resolveTarget(pad)
+				if p then panel, panelPos = pad, p.Position end
+			end
+			if not panel then
+				panel, panelPos = findEntryPanel()
+			end
+		end
 		if panel and panelPos then
 			waitRespawn()
 			instantTP(panelPos + Vector3.new(0, 4, 0))
@@ -1453,6 +1890,14 @@ local function autoWinLoop()
 				notify("Auto Win", "Entering code " .. code, "hash")
 				enterCodeAtPanel(panel, code)
 			end
+			local ep = elevatorPrompt()
+			if ep then
+				prepPrompt(ep)
+				firePrompt(ep)
+				task.wait(0.4)
+				firePrompt(ep)
+			end
+			task.wait(0.8)
 		end
 		if code then
 			setStatus("AUTO WIN done. Code: " .. code)
@@ -1476,6 +1921,7 @@ local function autoKeysLoop()
 			for _, t in ipairs(scanPrompts(DEADBOLT_NAMES, NEVER_EXIT, 20)) do
 				if not State.autokeys then break end
 				if (t.pos - origin).Magnitude <= 30 then
+					prepPrompt(t.prompt)
 					firePrompt(t.prompt)
 					lastUsed = os.clock()
 					setStatus("AUTO KEYS: used key (" .. countKeysHeld() .. " held)")
@@ -1508,7 +1954,17 @@ local function putCodeNow()
 			notify("Put Code", "Code not found — read the NOTE marks", "info")
 			return
 		end
-		local panel, panelPos = findEntryPanel()
+		local panel, panelPos = nil, nil
+		do
+			local pad = keypadModel()
+			if pad then
+				local _, p = resolveTarget(pad)
+				if p then panel, panelPos = pad, p.Position end
+			end
+			if not panel then
+				panel, panelPos = findEntryPanel()
+			end
+		end
 		if not panel or not panelPos then
 			setStatus("PUT CODE: panel not found. Code: " .. code)
 			notify("Put Code", "Panel not found. Code: " .. code, "info")
@@ -1579,7 +2035,7 @@ local function buildGui()
 	})
 	mSec:Paragraph({
 		Title = "How it works",
-		Content = "Monster ESP outlines the monster with name + distance. If the monster uses an odd name, enable NPC scan.",
+		Content = "Monster ESP outlines the monster (workspace.VER) with name + distance. If it ever renames, enable NPC scan.",
 	})
 
 	local iSec = espItems:Section({ Name = "Keys & Code", Side = 1 })
@@ -1611,9 +2067,23 @@ local function buildGui()
 			applyKindColors("code")
 		end,
 	})
+	UiRefs.closetsTgl = iSec:Toggle({
+		Name = "Closet ESP (hiding)", Default = State.closets, Flag = "ura_closets",
+		Callback = function(v)
+			State.closets = v
+			if v then fullScan() else clearKind("closet") end
+		end,
+	})
+	iSec:Colorpicker({
+		Name = "Closet color", Default = State.colCloset, Flag = "ura_colcloset",
+		Callback = function(v)
+			State.colCloset = v
+			applyKindColors("closet")
+		end,
+	})
 	iSec:Paragraph({
 		Title = "Code ESP",
-		Content = "Marks the NOTE / PAPER where the code IS (handwritten). It never marks the keypad where you type it.",
+		Content = "Marks the NOTE / PAPER where the code IS (CodeNote > Printed > Digits is read directly). It never marks the keypad where you type it.",
 	})
 
 	local vSec = espItems:Section({ Name = "Style", Side = 2 })
@@ -1697,6 +2167,17 @@ local function buildGui()
 		Title = "Speed",
 		Content = "Walk speed is re-applied constantly because the game keeps resetting it.",
 	})
+	local godSec = movMain:Section({ Name = "Survival", Side = 2 })
+	godSec:Toggle({
+		Name = "Infinite Lives", Default = State.godmode, Flag = "ura_godmode",
+		Callback = function(v)
+			applyGodmode(v)
+		end,
+	})
+	godSec:Paragraph({
+		Title = "How it works",
+		Content = "Pins Humanoid health to max and locks any life/vida counter to 999. Fully effective when the game trusts the client; otherwise combine with Noclip/Fly so the monster never touches you.",
+	})
 	local worldSub = movTab:SubTab({ Name = "World", Icon = "globe" })
 	local worldSec = worldSub:Section({ Name = "World", Side = 1 })
 	worldSec:Toggle({
@@ -1754,7 +2235,7 @@ local function buildGui()
 	})
 	autoSec:Paragraph({
 		Title = "What it does",
-		Content = "Auto Win: 1 clears entrance, 2 opens drawers, 3 grabs 4 keys, 4 opens deadbolts, 5 reads notes + enters the code. Auto Use Keys spends held keys on nearby exits. Put Code Now types the code once.",
+		Content = "Auto Win: 1 clears entrance, 2 opens drawers, 3 grabs HiddenKey1-4 (inventory-checked), 4 opens the Cube door locks, 5 reads CodeNote + enters it on the Keypad (Readout-verified) + fires the elevator. Auto Use Keys spends held keys on nearby exits. Put Code Now types the code once.",
 	})
 	local grabSec = autoMain:Section({ Name = "Grab", Side = 2 })
 	grabSec:Slider({
@@ -1861,8 +2342,20 @@ trackConnection(workspace.DescendantAdded:Connect(function(inst)
 				end
 			end
 		end)
-	elseif inst:IsA("ProximityPrompt") and State.codes then
+	elseif inst:IsA("ProximityPrompt") and (State.codes or State.closets) then
 		task.delay(0.5, function()
+			if Tracked[inst] or not inWorkspace(inst) then return end
+			if State.closets then
+				local hideHost = hidePromptHost(inst)
+				if hideHost and not Tracked[hideHost] and inWorkspace(hideHost) then
+					local target, part = resolveTarget(hideHost)
+					if target and part then
+						local hl, bb, txt = makeEspObjects(target, part)
+						Tracked[hideHost] = { kind = "closet", target = target, part = part, boxSize = boxSizeOf(target, part), hl = hl, bb = bb, txt = txt, digits = nil, label = "CLOSET", root = hideHost }
+						return
+					end
+				end
+			end
 			if not State.codes then return end
 			local host = readPromptHost(inst)
 			if host and not Tracked[host] and inWorkspace(host) then
@@ -1964,7 +2457,7 @@ trackConnection(RunService.Heartbeat:Connect(function(dt)
 	end
 	if doDist and StatusLabel then
 		if not State.autowin then
-			local m, k, c = countTargets()
+			local m, k, c, h = countTargets()
 			local code = getFoundCode()
 			local note = ""
 			if game.PlaceId ~= TARGET_PLACE then
@@ -1972,7 +2465,7 @@ trackConnection(RunService.Heartbeat:Connect(function(dt)
 			end
 			local codeTxt = code and ("  code:" .. code) or ""
 			pcall(function()
-				StatusLabel:Set("monster:" .. m .. "  key:" .. k .. "  code:" .. c .. codeTxt .. "  keys:" .. countKeysHeld() .. "/4" .. note)
+				StatusLabel:Set("monster:" .. m .. "  key:" .. k .. "  code:" .. c .. "  hide:" .. h .. codeTxt .. "  keys:" .. countKeysHeld() .. "/4" .. note)
 			end)
 		end
 	end
@@ -2010,6 +2503,11 @@ function Api.Unload()
 	State.noclip = false
 	State.fullbright = false
 	State.instantPrompt = false
+	State.godmode = false
+	for _, c in ipairs(GodConns) do
+		pcall(function() c:Disconnect() end)
+	end
+	GodConns = {}
 	disableFly()
 	applyFullbright(false)
 	applyInstantPrompt(false)
