@@ -25,11 +25,16 @@ Menu key: **RightShift**. In first person press **M** (game's own key) to free t
   values. It never marks the keypad.
 - Closet ESP (+ closet color) — hiding spots by name (closet/wardrobe/locker)
   and "hide" prompts.
-- Style: chams (outline), 2D corner boxes, snaplines, labels, max distance,
-  text size. Boxes/snaplines need the Drawing API; they auto-disable with a
-  notice when the executor lacks it. Fonts: GothamBlack billboards,
-  monospace Drawing text. The Drawing text hides while billboard labels are
-  on (otherwise the name shows twice).
+- Style: chams (outline), 2D corner boxes, snaplines (ON by default), labels,
+  max distance, text size. Boxes/snaplines need the Drawing API; they
+  auto-disable with a notice when the executor lacks it. Fonts: GothamBlack
+  billboards, monospace Drawing text. The Drawing text hides while billboard
+  labels are on (otherwise the name shows twice).
+- Material chams: ForceField overlay on every mark, with transparency slider
+  + flat-color tint toggle (follows each kind color). Originals are restored
+  on remove/disable/unload.
+- Shader chams: fullscreen monochrome FX (ColorCorrection) with saturation
+  and contrast sliders, re-applied every second in case the game wipes FX.
 - Do NOT run other MONOCHROME scripts at the same time: their ESP
   (`ESP_Label`, `VER_ESP`, `HiddenKeyESP`, `PlayerESP`) duplicates every mark.
   Our scanner ignores those objects, and only one monster entry is kept
@@ -56,7 +61,10 @@ Menu key: **RightShift**. In first person press **M** (game's own key) to free t
   enters it on the real `Keypad` (clicks each `Digit` until its `Readout`
   matches, max 20 tries per digit; screen-click fallback when the executor
   has no `fireclickdetector`) and fires the `Cylinder.002` elevator prompt
-  3 times. Generic name scans remain as fallback for every phase.
+  3 times. Before every door, a key Tool is equipped (doors validate the
+  held key). Lock phases run structural Cube prompts, then any `*lock*`
+  prompt, then the generic deadbolt scan. Generic name scans remain as
+  fallback for every phase.
 - Prompts are loosened before firing (`RequiresLineOfSight = false`,
   `MaxActivationDistance = 5000`) and fired via `fireproximityprompt` →
   `InputHoldBegin/End` → real E-key fallback.
@@ -78,7 +86,7 @@ Menu key: **RightShift**. In first person press **M** (game's own key) to free t
 On every load the script shows the Discord invite and copies it to the
 clipboard (`DISCORD_INVITE` at the top of the script — set your real link).
 
-The status bar shows `monster:N  key:N  code:N  hide:N  code:XXXX  keys:H/4`.
+The status bar shows `monster:N  key:N  code:N  hide:N  note:Y/N  code:XXXX  keys:H/4`.
 
 ## Notes / fixes
 
@@ -93,12 +101,17 @@ The status bar shows `monster:N  key:N  code:N  hide:N  code:XXXX  keys:H/4`.
   fallback (`VirtualInputManager`) when the executor lacks it, reads notes to
   pull the code from player UI, and types the code at the panel automatically.
 - **Code ESP**: `CodeNote` is force-marked structurally (plain-TextLabel
-  digits never resolve to a part via SurfaceGui lookup) and preferred for the
-  code value. Paper/note objects + "read" prompts + world digit texts +
-  readable code values remain as fallback. Keypads/panels/locks/safes are
-  excluded from marking (navigation only); the keypad itself is excluded from
-  Key ESP too (`keypad` contains `key`). Our own ESP labels are excluded
-  (no self-loop).
+  digits never resolve to a part via SurfaceGui lookup; Folder-type notes
+  anchor on their first inner part) and preferred for the code value. The
+  hunt also sweeps every "read" prompt in the world. Paper/note objects +
+  "read" prompts + world digit texts + readable code values remain as
+  fallback. Keypads/panels/locks/safes are excluded from marking
+  (navigation only); the keypad itself is excluded from Key ESP too
+  (`keypad` contains `key`). Our own ESP labels are excluded (no self-loop).
+- **Diagnostics**: the status bar shows `note:Y/N` (CodeNote presence,
+  refreshed every 10s); on load the script warns if `CodeNote` / `VER` /
+  `HiddenKey1-4` are missing (game renamed objects); View Code reports the
+  same when the code is not found. Send those values if something is missing.
 - **Unload**: fully removes ESP, drawings, fly/noclip/fullbright/prompt changes
   (restored), closes the menu and destroys the UI holders.
 

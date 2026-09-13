@@ -182,8 +182,14 @@ local State = {
 	godmode = false, -- infinite lives attempt (client-side locks)
 	chams = true, -- highlight outlines
 	boxes = true, -- 2D corner boxes (needs Drawing)
-	tracers = false, -- snaplines (needs Drawing)
+	tracers = true, -- snaplines (needs Drawing)
 	labels = true, -- name/distance billboards
+	matChams = false, -- ForceField material overlay on every mark
+	chamTransp = 0.4, -- material cham transparency
+	chamFlat = true, -- tint chammed parts with the kind color
+	shaderChams = false, -- fullscreen monochrome shader (ColorCorrection)
+	shaderSat = -1, -- shader saturation (-1 = full monochrome)
+	shaderContrast = 0.2, -- shader contrast boost
 	noclip = false,
 	fly = false,
 	instacollect = false, -- grab keys the moment you walk into range
@@ -773,9 +779,17 @@ local function scanPlayerGuiForCode()
 	return best or fallback
 end
 
+-- Forward: material-cham restore, assigned by the chams engine below
+-- (removeEntry runs before that code textually).
+local restoreChamForFn = nil
+
 local function removeEntry(inst)
 	local e = Tracked[inst]
 	if e then
+		-- Restore material-cham parts (engine assigned below).
+		if e.target and restoreChamForFn then
+			pcall(restoreChamForFn, e.target)
+		end
 		destroyDraw(e)
 		pcall(function() e.hl:Destroy() end)
 		pcall(function() e.bb:Destroy() end)
@@ -797,6 +811,95 @@ local function isKindEnabled(kind)
 	if kind == "code" then return State.codes end
 	if kind == "closet" then return State.closets end
 	return false
+end
+
+-- ===================== MATERIAL CHAMS =====================
+-- ForceField overlay over every marked target, originals restored on
+-- remove/disable/unload. Engine sits here so updateEntry/addEntry (below)
+-- and removeEntry (above, via restoreChamForFn) can all reach it.
+local ChamOrig = {} -- [BasePart] = {mat, color, transp}
+
+local function chamParts(target)
+	local parts = {}
+	if typeof(target) ~= "Instance" then return parts end
+	if target:IsA("BasePart") then
+		parts[1] = target
+	elseif target:IsA("Model") then
+		local ok, descs = pcall(function() return target:GetDescendants() end)
+		if ok then
+			for i = 1, #descs do
+				if descs[i]:IsA("BasePart") then parts[#parts + 1] = descs[i] end
+			end
+		end
+	end
+	return parts
+end
+
+local function applyChamToTarget(target, col)
+	for _, part in ipairs(chamParts(target)) do
+		if not ChamOrig[part] and not isOurEsp(part) then
+			local ok, m, c, t = pcall(function()
+				return part.Material, part.Color, part.Transparency
+			end)
+			if ok then
+				ChamOrig[part] = { mat = m, color = c, transp = t }
+				pcall(function()
+					part.Material = Enum.Material.ForceField
+					if State.chamFlat then part.Color = col end
+					part.Transparency = State.chamTransp
+				end)
+			end
+		end
+	end
+end
+
+restoreChamForFn = function(target)
+	for _, part in ipairs(chamParts(target)) do
+		local o = ChamOrig[part]
+		if o then
+			ChamOrig[part] = nil
+			pcall(function()
+				if part.Parent then
+					part.Material = o.mat
+					part.Color = o.color
+					part.Transparency = o.transp
+				end
+			end)
+		end
+	end
+end
+
+local function applyMaterialChams(on)
+	State.matChams = on
+	if not on then
+		for part, o in pairs(ChamOrig) do
+			ChamOrig[part] = nil
+			pcall(function()
+				if part.Parent then
+					part.Material = o.mat
+					part.Color = o.color
+					part.Transparency = o.transp
+				end
+			end)
+		end
+		for _, e in pairs(Tracked) do
+			e.chammed = nil
+		end
+		return
+	end
+	for _, e in pairs(Tracked) do
+		if e.target and isKindEnabled(e.kind) then
+			e.chammed = true
+			applyChamToTarget(e.target, kindColor(e.kind))
+		end
+	end
+end
+
+-- Re-apply after transparency / flat / color changes.
+local function refreshChamsIfOn()
+	if not State.matChams then return end
+	applyMaterialChams(false)
+	applyMaterialChams(true)
 end
 
 local function addEntry(inst)
@@ -837,8 +940,20 @@ local function forceEntry(inst, kind, label)
 	if kind == "code" and isEntryObject(inst) then return end
 	local target, part = resolveTarget(inst)
 	if not target or not part then
-		Tracked[inst] = { kind = kind, target = nil, part = nil, boxSize = nil, hl = nil, bb = nil, txt = nil, draw = nil, digits = nil, label = label, root = inst }
-		return
+		-- Non-adornable containers (e.g. CodeNote as a Folder): Highlight
+		-- cannot adorn them, so anchor on the first inner part instead.
+		local inner = inst:FindFirstChildWhichIsA("BasePart", true)
+		if inner then
+			part = inner
+			if inst:IsA("Model") or inst:IsA("BasePart") then
+				target = inst
+			else
+				target = inner
+			end
+		else
+			Tracked[inst] = { kind = kind, target = nil, part = nil, boxSize = nil, hl = nil, bb = nil, txt = nil, draw = nil, digits = nil, label = label, root = inst }
+			return
+		end
 	end
 	local hl, bb, txt = makeEspObjects(target, part)
 	local digits = nil
@@ -974,6 +1089,11 @@ local function updateEntry(e, origin, maxDist, refreshDigits)
 	-- snaplines never render (this was the "boxes don't work" bug).
 	if HasDrawing and (State.boxes or State.tracers) then
 		ensureDraw(e)
+	end
+	-- Material chams for entries that appeared while the toggle is on.
+	if State.matChams and e.target and not e.chammed and isKindEnabled(e.kind) then
+		e.chammed = true
+		applyChamToTarget(e.target, kindColor(e.kind))
 	end
 	if e.kind == "code" and refreshDigits then
 		if not refreshCodeDigits(e) then
@@ -1157,6 +1277,38 @@ local SpawnPos = nil
 do
 	local hrp = myHRP()
 	if hrp then SpawnPos = hrp.Position end
+end
+
+-- ===================== SHADER CHAMS =====================
+-- Fullscreen monochrome FX (a ColorCorrectionEffect in Lighting): the whole
+-- game renders desaturated with boosted contrast while ESP marks pop.
+local function ensureShader()
+	if not State.shaderChams then return end
+	local cc = Lighting:FindFirstChild("UraniumShader")
+	if not (typeof(cc) == "Instance" and cc:IsA("ColorCorrectionEffect")) then
+		if typeof(cc) == "Instance" then pcall(function() cc:Destroy() end) end
+		local ok, fx = pcall(Instance.new, "ColorCorrectionEffect")
+		if not ok or not fx then return end
+		cc = fx
+		cc.Name = "UraniumShader"
+		pcall(function() cc.Parent = Lighting end)
+	end
+	pcall(function()
+		cc.Saturation = State.shaderSat
+		cc.Contrast = State.shaderContrast
+		cc.Brightness = 0
+		cc.Enabled = true
+	end)
+end
+
+local function applyShaderChams(on)
+	State.shaderChams = on
+	if not on then
+		local cc = Lighting:FindFirstChild("UraniumShader")
+		if cc then pcall(function() cc:Destroy() end) end
+		return
+	end
+	ensureShader()
 end
 
 local function teleportSpawn()
@@ -1564,21 +1716,35 @@ local function keypadModel()
 	local map = mapRoot()
 	local k = map:FindFirstChild("Keypad")
 	if k then return k end
+	-- Fuzzy: any model with "keypad" in the name...
 	for _, inst in ipairs(workspace:GetDescendants()) do
-		if inst:IsA("Model") and lowerName(inst) == "keypad" then
+		if inst:IsA("Model") and string.find(lowerName(inst), "keypad", 1, true) then
 			return inst
+		end
+	end
+	-- ...or any model holding Digit1-4 children (name may have changed).
+	for _, inst in ipairs(workspace:GetDescendants()) do
+		if inst:IsA("Model") and not isOurEsp(inst) then
+			local hits = 0
+			for w = 1, 4 do
+				if inst:FindFirstChild("Digit" .. w) then hits = hits + 1 end
+			end
+			if hits >= 3 then return inst end
 		end
 	end
 	return nil
 end
 
+local function findCodeNote()
+	local note = mapRoot():FindFirstChild("CodeNote")
+	if note then return note end
+	return workspace:FindFirstChild("CodeNote", true)
+end
+
 -- Direct read of the real paper: CodeNote > Printed > Digits (plain
 -- TextLabel, no SurfaceGui). Returns the digit string or nil.
 local function readCodeNoteDirect()
-	local note = mapRoot():FindFirstChild("CodeNote")
-	if not note then
-		note = workspace:FindFirstChild("CodeNote", true)
-	end
+	local note = findCodeNote()
 	if not note then return nil end
 	local printed = note:FindFirstChild("Printed")
 	local digitsObj = (printed and printed:FindFirstChild("Digits"))
@@ -1590,6 +1756,61 @@ local function readCodeNoteDirect()
 	end
 	return extractDigits(note)
 end
+-- Hold a key Tool in hand: doors often validate the equipped key,
+-- firing their prompt empty-handed does nothing.
+local function equipKeyTool()
+	local char = myCharacter()
+	local hum = myHumanoid()
+	if not char or not hum then return false end
+	for _, t in ipairs(char:GetChildren()) do
+		if t:IsA("Tool") and matchesAny(lowerName(t), KEY_NAMES) then
+			return true
+		end
+	end
+	local bp = LocalPlayer and LocalPlayer:FindFirstChild("Backpack") or nil
+	if bp then
+		for _, t in ipairs(bp:GetChildren()) do
+			if t:IsA("Tool") and matchesAny(lowerName(t), KEY_NAMES) then
+				pcall(function() hum:EquipTool(t) end)
+				task.wait(0.3)
+				return true
+			end
+		end
+	end
+	return false
+end
+
+-- Any prompt with "lock" in its own/parent/grandparent name (e.g.
+-- LockPromptPoint > LockPrompt). Closets ("locker") and the elevator are
+-- excluded.
+local function scanLockPrompts(limit)
+	local out = {}
+	for _, inst in ipairs(workspace:GetDescendants()) do
+		if inst:IsA("ProximityPrompt") and not isOurEsp(inst) then
+			local host = inst.Parent
+			local scope = host and host.Parent or nil
+			local hay = lowerName(inst) .. " " .. lowerName(host) .. " " .. lowerName(scope)
+			if string.find(hay, "lock", 1, true) then
+				local skip = false
+				if matchesAny(lowerName(host) .. " " .. lowerName(scope), CLOSET_NAMES) then
+					skip = true
+				end
+				if not skip and string.find(hay, "elevator", 1, true) then
+					skip = true
+				end
+				if not skip then
+					local part = promptRootPart(inst)
+					if part then
+						out[#out + 1] = { prompt = inst, pos = part.Position }
+						if limit and #out >= limit then break end
+					end
+				end
+			end
+		end
+	end
+	return out
+end
+
 local function findEntryPanel()
 	for _, inst in ipairs(workspace:GetDescendants()) do
 		if inst:IsA("Model") or inst:IsA("BasePart") then
@@ -1649,6 +1870,24 @@ local function clickButtonAt(btn)
 	return vimClick(cx, cy)
 end
 
+-- Fire every "read this" prompt in the world (broad sweep for notes the
+-- ESP may not have marked yet). Used by the code hunt.
+local function fireAllReadPrompts(limit)
+	local n = 0
+	for _, inst in ipairs(workspace:GetDescendants()) do
+		if inst:IsA("ProximityPrompt") and not isOurEsp(inst) then
+			local host = readPromptHost(inst)
+			if host and inWorkspace(host) then
+				prepPrompt(inst)
+				firePrompt(inst)
+				n = n + 1
+				if limit and n >= limit then break end
+			end
+		end
+	end
+	return n
+end
+
 -- Read the real paper first (CodeNote > Printed > Digits), then tracked
 -- marks, then every NOTE (fires Read prompts) + UI + world scan.
 local function acquireCode()
@@ -1661,6 +1900,7 @@ local function acquireCode()
 			firePromptsIn(e.root)
 		end
 	end
+	fireAllReadPrompts(20)
 	task.wait(0.6)
 	code = scanPlayerGuiForCode() or getFoundCode()
 	if code then return code end
@@ -1888,13 +2128,16 @@ local function autoWinLoop()
 		end
 		if not State.autowin then break end
 
-		-- Phase 3: door locks (structural Cube.* prompts first)
+		-- Phase 3: door locks (key equipped, structural Cube.* first,
+		-- then any *lock* prompt, then the generic deadbolt scan)
 		setStatus("AUTO WIN 4/5: opening deadbolts (" .. countKeysHeld() .. "/" .. KEYS_NEEDED .. " keys)")
 		notify("Auto Win", "Phase 4/5: opening exit", "lock-open")
+		equipKeyTool()
 		for _, lname in ipairs(LOCK_PARTS) do
 			if not State.autowin then break end
 			waitRespawn()
 			if not State.autowin then break end
+			equipKeyTool()
 			local lp = lockPromptByName(lname)
 			if lp then
 				prepPrompt(lp)
@@ -1906,6 +2149,19 @@ local function autoWinLoop()
 				firePrompt(lp)
 				task.wait(0.25)
 			end
+		end
+		for _, t in ipairs(scanLockPrompts(20)) do
+			if not State.autowin then break end
+			waitRespawn()
+			if not State.autowin then break end
+			equipKeyTool()
+			prepPrompt(t.prompt)
+			instantTP(t.pos + Vector3.new(0, 3, 0))
+			if not State.autowin then break end
+			firePrompt(t.prompt)
+			task.wait(0.3)
+			firePrompt(t.prompt)
+			task.wait(0.25)
 		end
 		for _, t in ipairs(scanPrompts(DEADBOLT_NAMES, NEVER_EXIT, 20)) do
 			if not State.autowin then break end
@@ -1989,6 +2245,7 @@ local function autoKeysLoop()
 	local lastUsed = 0
 	while State.autokeys and State.running do
 		if countKeysHeld() > 0 then
+			equipKeyTool()
 			local origin = rootPosition()
 			for _, t in ipairs(scanPrompts(DEADBOLT_NAMES, NEVER_EXIT, 20)) do
 				if not State.autokeys then break end
@@ -2029,8 +2286,10 @@ local function viewCodeNow()
 			setStatus("CODE: " .. code .. " (copied)")
 			notify("CODE: " .. code, "Copied to clipboard — type it at the Keypad", "check")
 		else
-			setStatus("VIEW CODE: not found — get closer to NOTE marks")
-			notify("View Code", "Not found — walk near the NOTE marks and retry", "info")
+			local m, _, c = countTargets()
+			local noteTxt = findCodeNote() and "found" or "MISSING"
+			setStatus("VIEW CODE: not found (note:" .. noteTxt .. " marks:" .. c .. ")")
+			notify("View Code", "Not found — CodeNote:" .. noteTxt .. ", code marks:" .. c .. ". Walk near NOTE marks and retry", "info")
 		end
 	end)
 end
@@ -2171,6 +2430,7 @@ local function buildGui()
 		Callback = function(v)
 			State.colMonster = v
 			applyKindColors("monster")
+			refreshChamsIfOn()
 		end,
 	})
 	mSec:Paragraph({
@@ -2191,6 +2451,7 @@ local function buildGui()
 		Callback = function(v)
 			State.colKey = v
 			applyKindColors("key")
+			refreshChamsIfOn()
 		end,
 	})
 	UiRefs.codesTgl = iSec:Toggle({
@@ -2205,6 +2466,7 @@ local function buildGui()
 		Callback = function(v)
 			State.colCode = v
 			applyKindColors("code")
+			refreshChamsIfOn()
 		end,
 	})
 	UiRefs.closetsTgl = iSec:Toggle({
@@ -2219,6 +2481,7 @@ local function buildGui()
 		Callback = function(v)
 			State.colCloset = v
 			applyKindColors("closet")
+			refreshChamsIfOn()
 		end,
 	})
 	iSec:Paragraph({
@@ -2254,6 +2517,46 @@ local function buildGui()
 	vSec:Toggle({
 		Name = "Labels (name + dist)", Default = State.labels, Flag = "ura_labels",
 		Callback = function(v) State.labels = v end,
+	})
+	vSec:Toggle({
+		Name = "Material chams", Default = State.matChams, Flag = "ura_matchams",
+		Callback = function(v)
+			applyMaterialChams(v)
+		end,
+	})
+	vSec:Slider({
+		Name = "Cham transparency", Min = 0, Max = 0.9, Default = State.chamTransp, Flag = "ura_chamtransp",
+		Callback = function(v)
+			State.chamTransp = v
+			refreshChamsIfOn()
+		end,
+	})
+	vSec:Toggle({
+		Name = "Flat cham color", Default = State.chamFlat, Flag = "ura_chamflat",
+		Callback = function(v)
+			State.chamFlat = v
+			refreshChamsIfOn()
+		end,
+	})
+	vSec:Toggle({
+		Name = "Shader chams (mono FX)", Default = State.shaderChams, Flag = "ura_shader",
+		Callback = function(v)
+			applyShaderChams(v)
+		end,
+	})
+	vSec:Slider({
+		Name = "Shader saturation", Min = -1, Max = 1, Default = State.shaderSat, Flag = "ura_shadersat",
+		Callback = function(v)
+			State.shaderSat = v
+			if State.shaderChams then ensureShader() end
+		end,
+	})
+	vSec:Slider({
+		Name = "Shader contrast", Min = -1, Max = 1, Default = State.shaderContrast, Flag = "ura_shadercon",
+		Callback = function(v)
+			State.shaderContrast = v
+			if State.shaderChams then ensureShader() end
+		end,
 	})
 	vSec:Slider({
 		Name = "Max distance", Min = 100, Max = 2000, Default = State.maxDist, Suffix = "m", Flag = "ura_maxdist",
@@ -2566,6 +2869,7 @@ pcall(function()
 end)
 
 local accDist, accCode, accText, accFb = 0, 0, 0, 0
+local noteFlag, noteFlagAt = "?", 0
 trackConnection(RunService.Heartbeat:Connect(function(dt)
 	if not State.running then return end
 	-- Movement systems run every frame (game resets speed constantly)
@@ -2589,11 +2893,12 @@ trackConnection(RunService.Heartbeat:Connect(function(dt)
 		end
 	end
 	flyStep()
-	if State.fullbright then
+	if State.fullbright or State.shaderChams then
 		accFb = accFb + dt
 		if accFb >= 1 then
 			accFb = 0
-			enforceFullbright()
+			if State.fullbright then enforceFullbright() end
+			if State.shaderChams then ensureShader() end
 		end
 	end
 	-- ESP refresh timers
@@ -2630,13 +2935,18 @@ trackConnection(RunService.Heartbeat:Connect(function(dt)
 		if not State.autowin then
 			local m, k, c, h = countTargets()
 			local code = getFoundCode()
+			-- Cached CodeNote presence (recursive fallback is expensive).
+			if os.clock() - noteFlagAt > 10 then
+				noteFlagAt = os.clock()
+				noteFlag = findCodeNote() and "Y" or "N"
+			end
 			local note = ""
 			if game.PlaceId ~= TARGET_PLACE then
 				note = " (outside MONOCHROME)"
 			end
 			local codeTxt = code and ("  code:" .. code) or ""
 			pcall(function()
-				StatusLabel:Set("monster:" .. m .. "  key:" .. k .. "  code:" .. c .. "  hide:" .. h .. codeTxt .. "  keys:" .. countKeysHeld() .. "/4" .. note)
+				StatusLabel:Set("monster:" .. m .. "  key:" .. k .. "  code:" .. c .. "  hide:" .. h .. "  note:" .. noteFlag .. codeTxt .. "  keys:" .. countKeysHeld() .. "/4" .. note)
 			end)
 		end
 	end
@@ -2664,6 +2974,26 @@ else
 	notify("URANIUM loaded", "Press RightShift for the menu", "check")
 end
 
+-- Startup map check: if the game renamed key objects, say so immediately.
+do
+	local missing = {}
+	if not findCodeNote() then missing[#missing + 1] = "CodeNote" end
+	local verFound = false
+	for _, ch in ipairs(workspace:GetChildren()) do
+		if lowerName(ch) == "ver" then verFound = true break end
+	end
+	if not verFound then missing[#missing + 1] = "VER" end
+	local hkFound = 0
+	local map = mapRoot()
+	for i = 1, HIDDEN_KEYS_TOTAL do
+		if map:FindFirstChild(HIDDEN_KEY_PREFIX .. i) then hkFound = hkFound + 1 end
+	end
+	if hkFound == 0 then missing[#missing + 1] = "HiddenKey1-4" end
+	if #missing > 0 then
+		notify("URANIUM", "Not found: " .. table.concat(missing, ", ") .. " — game may have renamed objects", "alert")
+	end
+end
+
 -- Discord invite on load (copied to clipboard so joining is one paste away).
 pcall(function()
 	if typeof(setclipboard) == "function" then
@@ -2684,6 +3014,10 @@ function Api.Unload()
 	State.fullbright = false
 	State.instantPrompt = false
 	State.godmode = false
+	State.matChams = false
+	State.shaderChams = false
+	applyMaterialChams(false)
+	applyShaderChams(false)
 	for _, c in ipairs(GodConns) do
 		pcall(function() c:Disconnect() end)
 	end
