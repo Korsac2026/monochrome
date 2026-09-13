@@ -62,7 +62,13 @@ Menu key: **RightShift**. In first person press **M** (game's own key) to free t
   `InputHoldBegin/End` → real E-key fallback.
 - Auto Use Keys: passive loop, spends held keys on nearby exits (no teleport).
 - Put Code Now: one-shot code entry at the panel (prefers the real Keypad).
+- View Code: hunts the code remotely (Read prompts fire at any distance),
+  shows it in a notification + status and copies it to the clipboard —
+  no need to walk to the note.
+- Insta Collect: passive pickup — walk within the pickup radius of a key and
+  it fires its prompt automatically (2s cooldown per key, no teleport).
 - Collect distance slider (stand-off range when grabbing).
+- Pickup radius slider (Insta Collect range).
 - Live status label.
 
 **Settings**

@@ -70,8 +70,7 @@ local HasDrawing = typeof(Drawing) == "table"
 local TARGET_PLACE = 134208374070897
 local KEYS_NEEDED = 4
 -- Discord server: shown + copied to clipboard every time the script loads.
--- TODO: replace with the real invite code.
-local DISCORD_INVITE = "https://discord.gg/TU-CODIGO"
+local DISCORD_INVITE = "https://discord.gg/unWK5GXa9U"
 
 -- Monochrome palette (ESP defaults)
 local WHITE = Color3.new(1, 1, 1)
@@ -187,6 +186,8 @@ local State = {
 	labels = true, -- name/distance billboards
 	noclip = false,
 	fly = false,
+	instacollect = false, -- grab keys the moment you walk into range
+	collectRadius = 12, -- pickup radius for Insta Collect (studs)
 	instantPrompt = false,
 	fullbright = false,
 	autowin = false,
@@ -2010,6 +2011,74 @@ local function autoKeysLoop()
 	end
 end
 
+-- One-shot: hunt the code remotely (Read prompts fire at any distance)
+-- and show it — no need to walk to the note.
+local function viewCodeNow()
+	task.spawn(function()
+		setStatus("VIEW CODE: reading notes...")
+		notify("View Code", "Reading notes...", "eye")
+		local code = acquireCode()
+		if not code then
+			scanCodeTexts()
+			code = getFoundCode() or readCodeNoteDirect()
+		end
+		if code then
+			pcall(function()
+				if typeof(setclipboard) == "function" then setclipboard(code) end
+			end)
+			setStatus("CODE: " .. code .. " (copied)")
+			notify("CODE: " .. code, "Copied to clipboard — type it at the Keypad", "check")
+		else
+			setStatus("VIEW CODE: not found — get closer to NOTE marks")
+			notify("View Code", "Not found — walk near the NOTE marks and retry", "info")
+		end
+	end)
+end
+
+-- Insta Collect: grab nearby keys the moment you walk into range (no TP,
+-- no Auto Win needed). Fires the entry, its target and a key-named parent
+-- (prompts may sit on siblings, e.g. HiddenKey > KeyPrompt), plus one E
+-- press per cycle for in-range prompts.
+local function instaCollectLoop()
+	local cool = {}
+	while State.instacollect and State.running do
+		local hrp = myHRP()
+		if hrp then
+			local origin = hrp.Position
+			local firedAny = false
+			for inst, e in pairs(Tracked) do
+				if not State.instacollect then break end
+				if e.kind == "key" and e.part and inWorkspace(inst) then
+					if (e.part.Position - origin).Magnitude <= State.collectRadius then
+						local last = cool[inst] or 0
+						if os.clock() - last >= 2 then
+							cool[inst] = os.clock()
+							local root = e.root or inst
+							firePromptsIn(root)
+							if e.target and e.target ~= root then
+								firePromptsIn(e.target)
+							end
+							local par = root.Parent
+							if typeof(par) == "Instance" and par ~= workspace and par ~= game
+								and matchesAny(lowerName(par), KEY_NAMES) then
+								firePromptsIn(par)
+							end
+							firedAny = true
+						end
+					end
+				end
+			end
+			if firedAny then
+				pressE(0.4)
+			end
+		end
+		for i = 1, 3 do
+			if not State.instacollect or not State.running then break end
+			task.wait(0.1)
+		end
+	end
+end
+
 -- One-shot: read code + teleport to panel + type it.
 local function putCodeNow()
 	task.spawn(function()
@@ -2306,12 +2375,27 @@ local function buildGui()
 	})
 	autoSec:Paragraph({
 		Title = "What it does",
-		Content = "Auto Win: 1 clears entrance, 2 opens drawers, 3 grabs HiddenKey1-4 (inventory-checked), 4 opens the Cube door locks, 5 reads CodeNote + enters it on the Keypad (Readout-verified) + fires the elevator. Auto Use Keys spends held keys on nearby exits. Put Code Now types the code once.",
+		Content = "Auto Win: 1 clears entrance, 2 opens drawers, 3 grabs HiddenKey1-4 (inventory-checked), 4 opens the Cube door locks, 5 hunts the code, types it on the Keypad and fires the elevator. Auto Use Keys spends held keys on nearby exits. Put Code Now types the code once. View Code shows the code + copies it, no walking needed.",
 	})
 	local grabSec = autoMain:Section({ Name = "Grab", Side = 2 })
 	grabSec:Slider({
 		Name = "Collect distance", Min = 2, Max = 20, Default = State.collectDist, Suffix = "studs", Flag = "ura_collect",
 		Callback = function(v) State.collectDist = v end,
+	})
+	grabSec:Button({
+		Name = "View Code",
+		Callback = function() viewCodeNow() end,
+	})
+	grabSec:Toggle({
+		Name = "Insta Collect (walk near keys)", Default = State.instacollect, Flag = "ura_instacollect",
+		Callback = function(v)
+			State.instacollect = v
+			if v then task.spawn(instaCollectLoop) end
+		end,
+	})
+	grabSec:Slider({
+		Name = "Pickup radius", Min = 6, Max = 40, Default = State.collectRadius, Suffix = "studs", Flag = "ura_pickup",
+		Callback = function(v) State.collectRadius = v end,
 	})
 	grabSec:Paragraph({
 		Title = "Teleport",
@@ -2594,6 +2678,7 @@ function Api.Unload()
 	State.running = false
 	State.autowin = false
 	State.autokeys = false
+	State.instacollect = false
 	State.fly = false
 	State.noclip = false
 	State.fullbright = false
