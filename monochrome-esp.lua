@@ -195,6 +195,9 @@ local State = {
 	labels = true, -- name/distance billboards
 	noclip = false,
 	fly = false,
+	antiKill = false, -- TP away when the monster gets close
+	antiKillRadius = 15, -- trigger distance (studs)
+	antiKillFlee = 100, -- distance to flee to (studs)
 	instacollect = false, -- grab keys the moment you walk into range
 	collectRadius = 12, -- pickup radius for Insta Collect (studs)
 	playerEsp = false, -- see other players
@@ -631,79 +634,41 @@ local function destroyDraw(e)
 	e.draw = nil
 end
 
--- Calculate accurate 2D bounding box by projecting all 8 corners of 3D box
-local function calculateBox2D(target, part)
-	-- Get the size to use
-	local sz = e.boxSize or e.part.Size
-	if not sz then
-		if target and target:IsA("Model") then
-			local ok, size = pcall(function() return target:GetExtentsSize() end)
-			if ok and size then sz = size end
-		end
-		if not sz and part then sz = part.Size end
-		if not sz then sz = Vector3.new(4, 6, 2) end  -- fallback size
-	end
-
-	-- Get the center position (we already have pPos from drawEntry scope)
-	-- We'll calculate the 8 corners of the 3D bounding box
-	local halfSize = sz / 2
+-- Accurate 2D bounds: project all 8 corners of the 3D box.
+local function projectBox2D(center, sz)
+	local half = sz / 2
 	local corners = {
-		-- Bottom face (z = -halfSize.Z)
-		pPos + Vector3.new(-halfSize.X, -halfSize.Y, -halfSize.Z),
-		pPos + Vector3.new( halfSize.X, -halfSize.Y, -halfSize.Z),
-		pPos + Vector3.new(-halfSize.X,  halfSize.Y, -halfSize.Z),
-		pPos + Vector3.new( halfSize.X,  halfSize.Y, -halfSize.Z),
-		-- Top face (z = +halfSize.Z)
-		pPos + Vector3.new(-halfSize.X, -halfSize.Y,  halfSize.Z),
-		pPos + Vector3.new( halfSize.X, -halfSize.Y,  halfSize.Z),
-		pPos + Vector3.new(-halfSize.X,  halfSize.Y,  halfSize.Z),
-		pPos + Vector3.new( halfSize.X,  halfSize.Y,  halfSize.Z),
+		center + Vector3.new(-half.X, -half.Y, -half.Z),
+		center + Vector3.new( half.X, -half.Y, -half.Z),
+		center + Vector3.new(-half.X,  half.Y, -half.Z),
+		center + Vector3.new( half.X,  half.Y, -half.Z),
+		center + Vector3.new(-half.X, -half.Y,  half.Z),
+		center + Vector3.new( half.X, -half.Y,  half.Z),
+		center + Vector3.new(-half.X,  half.Y,  half.Z),
+		center + Vector3.new( half.X,  half.Y,  half.Z),
 	}
-
-	-- Project all corners to viewport space
-	local screenPoints = {}
 	local minX, minY = math.huge, math.huge
 	local maxX, maxY = -math.huge, -math.huge
-	local anyInFront = false
-
-	for _, corner in ipairs(corners) do
-		local screenPoint, onScreen = Camera:WorldToViewportPoint(corner)
-		if onScreen and screenPoint.Z > 0 then
-			anyInFront = true
-			screenPoints[#screenPoints + 1] = screenPoint
-			if screenPoint.X < minX then minX = screenPoint.X end
-			if screenPoint.X > maxX then maxX = screenPoint.X end
-			if screenPoint.Y < minY then minY = screenPoint.Y end
-			if screenPoint.Y > maxY then maxY = screenPoint.Y end
+	local any = false
+	for i = 1, 8 do
+		local sp, on = Camera:WorldToViewportPoint(corners[i])
+		if on and sp.Z > 0 then
+			any = true
+			if sp.X < minX then minX = sp.X end
+			if sp.X > maxX then maxX = sp.X end
+			if sp.Y < minY then minY = sp.Y end
+			if sp.Y > maxY then maxY = sp.Y end
 		end
 	end
-
-	if not anyInFront or #screenPoints == 0 then
-		return nil -- no visible corners
-	end
-
-	-- Add some padding to avoid thin boxes
-	local padding = 2
-	minX = math.max(0, minX - padding)
-	minY = math.max(0, minY - padding)
-	maxX = min(Camera.ViewportSize.X, maxX + padding)
-	maxY = min(Camera.ViewportSize.Y, maxY + padding)
-
-	local width = maxX - minX
-	local height = maxY - minY
-
-	-- Ensure minimum size
-	if width < 8 then width = 8 end
-	if height < 8 then height = 8 end
-
-	return {
-		x = minX,
-		y = minY,
-		width = width,
-		height = height,
-		centerX = (minX + maxX) / 2,
-		centerY = (minY + maxY) / 2
-	}
+	if not any then return nil end
+	local pad = 2
+	minX = math.max(0, minX - pad)
+	minY = math.max(0, minY - pad)
+	maxX = math.min(Camera.ViewportSize.X, maxX + pad)
+	maxY = math.min(Camera.ViewportSize.Y, maxY + pad)
+	local w = math.max(maxX - minX, 8)
+	local h = math.max(maxY - minY, 8)
+	return minX, minY, w, h
 end
 
 local function drawEntry(e, origin)
@@ -725,73 +690,56 @@ local function drawEntry(e, origin)
 		hideDraw(e)
 		return
 	end
-
 	local cPos, onScreen = Camera:WorldToViewportPoint(pPos)
 	if not onScreen or cPos.Z <= 0 then
 		hideDraw(e)
 		return
 	end
-
-	-- Calculate accurate 2D bounding box
-	local box2D = calculateBox2D(target, part)
-	if not box2D then
-		-- Fallback to old method if 2D calculation fails
-		local sz = e.boxSize or e.part.Size
-		local top = Camera:WorldToViewportPoint(pPos + Vector3.new(0, sz.Y / 2, 0))
-		local bot = Camera:WorldToViewportPoint(pPos - Vector3.new(0, sz.Y / 2, 0))
-		local h = math.clamp(math.abs(top.Y - bot.Y), 8, 1200)
-		local w = math.clamp(h * 0.58, 8, 800)
-		local cx, cy = cPos.X, (top.Y + bot.Y) / 2
-		local ty, by = cy - h / 2, cy + h / 2
-		local lx, rx = cx - w / 2, cx + w / 2
-		local cl = math.max(math.min(w, h) * 0.28, 4)
-	else
-		-- Use calculated 2D box
-		local lx = box2D.x
-		local rx = box2D.x + box2D.width
-		local ty = box2D.y
-		local by = box2D.y + box2D.height
-		local cx = box2D.centerX
-		local cy = box2D.centerY
-
-		-- Corner size: 20% of smaller dimension, min 3px, max 20px
-		local cl = math.max(math.min(box2D.width, box2D.height) * 0.2, 3)
-		cl = math.min(cl, 20)
-	end
 	local col = kindColor(e.kind)
-
+	-- 2D bounds from the real 3D box (falls back to a height estimate)
+	local sz = e.boxSize or e.part.Size
+	local lx, ty, w, h = projectBox2D(pPos, sz)
+	if not lx then
+		local top, onT = Camera:WorldToViewportPoint(pPos + Vector3.new(0, sz.Y / 2, 0))
+		local bot, onB = Camera:WorldToViewportPoint(pPos - Vector3.new(0, sz.Y / 2, 0))
+		if not onT and not onB then
+			hideDraw(e)
+			return
+		end
+		h = math.max(math.abs((top.Y or cPos.Y) - (bot.Y or cPos.Y)), 8)
+		w = math.max(h * 0.58, 8)
+		lx = cPos.X - w / 2
+		ty = math.min(top.Y, bot.Y)
+	end
+	local rx = lx + w
+	local by = ty + h
+	local cx = lx + w / 2
+	local cl = math.max(math.min(w, h) * 0.25, 3)
 	local pts = {
 		{ lx, ty, lx + cl, ty }, { lx, ty, lx, ty + cl },
 		{ rx - cl, ty, rx, ty }, { rx, ty, rx, ty + cl },
 		{ lx, by - cl, lx, by }, { lx, by, lx + cl, by },
 		{ rx - cl, by, rx, by }, { rx, by, rx, by - cl },
 	}
-
 	if d.isGui then
-		if showBox then
-			for i = 1, 8 do
-				local f = d.c[i]
-				local p = pts[i]
-				local x1, y1, x2, y2 = p[1], p[2], p[3], p[4]
-				f.BackgroundColor3 = col
-				f.Position = UDim2.new(0, math.min(x1, x2), 0, math.min(y1, y2))
-				f.Size = UDim2.new(0, math.max(math.abs(x2 - x1), 1.8), 0, math.max(math.abs(y2 - y1), 1.8))
-				f.Visible = true
-			end
-		else
-			for i = 1, 8 do d.c[i].Visible = false end
+		for i = 1, 8 do
+			local f = d.c[i]
+			local p = pts[i]
+			local x1, y1, x2, y2 = p[1], p[2], p[3], p[4]
+			f.BackgroundColor3 = col
+			f.Position = UDim2.new(0, math.min(x1, x2), 0, math.min(y1, y2))
+			f.Size = UDim2.new(0, math.max(math.abs(x2 - x1), 1.8), 0, math.max(math.abs(y2 - y1), 1.8))
+			f.Visible = showBox
 		end
 		if showTrac then
 			local vs = Camera.ViewportSize
 			local from = Vector2.new(vs.X / 2, vs.Y)
 			local to = Vector2.new(cx, by)
 			local diff = to - from
-			local length = diff.Magnitude
-			local angle = math.deg(math.atan2(diff.Y, diff.X))
 			d.snap.BackgroundColor3 = col
 			d.snap.Position = UDim2.new(0, from.X, 0, from.Y)
-			d.snap.Size = UDim2.new(0, length, 0, 1.2)
-			d.snap.Rotation = angle
+			d.snap.Size = UDim2.new(0, diff.Magnitude, 0, 1.2)
+			d.snap.Rotation = math.deg(math.atan2(diff.Y, diff.X))
 			d.snap.Visible = true
 		else
 			d.snap.Visible = false
@@ -1964,12 +1912,13 @@ local function keypadModel()
 			return inst
 		end
 	end
-	-- ...or any model holding Digit1-4 children (name may have changed).
+	-- ...or any model holding Digit1-4 anywhere in its hierarchy
+	-- (digits may be nested: Keypad > Panel > Digit1).
 	for _, inst in ipairs(workspace:GetDescendants()) do
 		if inst:IsA("Model") and not isOurEsp(inst) then
 			local hits = 0
 			for w = 1, 4 do
-				if inst:FindFirstChild("Digit" .. w) then hits = hits + 1 end
+				if inst:FindFirstChild("Digit" .. w, true) then hits = hits + 1 end
 			end
 			if hits >= 3 then return inst end
 		end
@@ -2159,13 +2108,28 @@ local function findEntryPanel()
 end
 
 -- Collect digit controls on the panel: ClickDetectors (fast path) and
--- clickable TextButtons (VIM screen clicks).
+-- clickable TextButtons (VIM screen clicks). The ClickDetector usually
+-- hangs off a child named "Digit" whose parent is "Digit1", so walk up
+-- the ancestor chain looking for a digit slot name.
+local function slotNameFrom(inst)
+	local node = inst
+	for _ = 1, 3 do
+		if typeof(node) ~= "Instance" then break end
+		local n = lowerName(node)
+		local slot = string.match(n, "^digit(%d)$")
+		if slot then return slot end
+		if #n == 1 and string.match(n, "%d") then return n end
+		node = node.Parent
+	end
+	return nil
+end
+
 local function panelDigitControls(panelModel)
 	local clicks, buttons = {}, {}
 	for _, d in ipairs(panelModel:GetDescendants()) do
 		if d:IsA("ClickDetector") then
-			local nm = lowerName(d.Parent)
-			if #nm == 1 and string.match(nm, "%d") then clicks[nm] = d end
+			local slot = slotNameFrom(d)
+			if slot then clicks[slot] = d end
 		elseif d:IsA("TextButton") then
 			local t = d.Text or ""
 			if #t == 1 and string.match(t, "%d") and d.Visible then
@@ -2232,7 +2196,9 @@ local function screenClickPart(part)
 	return vimClick(v.X, v.Y)
 end
 
--- Read the digit currently shown on one Keypad slot (Readout label).
+-- Read the digit currently shown on one Keypad slot. Reads the Readout
+-- label first; if there is none, any single-digit TextLabel in the slot
+-- subtree (the screenshot shows SurfaceGui digits on each box).
 local function keypadSlotDigit(digitW)
 	local readout = digitW:FindFirstChild("Readout", true)
 	local shown = nil
@@ -2245,24 +2211,38 @@ local function keypadSlotDigit(digitW)
 			if lbl then pcall(function() shown = lbl.Text end) end
 		end
 	end
+	if not shown then
+		for _, d in ipairs(digitW:GetDescendants()) do
+			if d:IsA("TextLabel") or d:IsA("TextButton") then
+				local t = d.Text or ""
+				if #t == 1 and string.match(t, "%d") then
+					shown = t
+					break
+				end
+			end
+		end
+	end
 	return shown and string.match(tostring(shown), "%d") or nil
 end
 
 -- Click one digit on the Keypad until its Readout shows the wanted char.
 -- Methods in order: fireclickdetector (x4) -> VIM screen click on the digit
--- part (x3) -> VIM click on digit TextButtons. Verified each round.
+-- part (x3) -> VIM click on digit TextButtons. Verified each round; when
+-- the Readout is unreadable, clicks are counted from the last known digit.
 local function pressKeypadDigit(pad, w, want, force)
-	local digitW = pad:FindFirstChild("Digit" .. w)
+	local digitW = pad:FindFirstChild("Digit" .. w, true)
+		or pad:FindFirstChild("digit" .. w, true)
 	if not digitW then return false end
-	local clicker = digitW:FindFirstChild("Digit") or digitW
+	local clicker = digitW:FindFirstChild("Digit", true) or digitW
 	local det = clicker:FindFirstChildOfClass("ClickDetector")
 		or digitW:FindFirstChildOfClass("ClickDetector", true)
 	local dw = digitW:IsA("BasePart") and digitW or digitW:FindFirstChildWhichIsA("BasePart", true)
 
-	for round = 1, 8 do
+	for round = 1, 10 do
 		if not State.autowin and not force then return false end
-		if keypadSlotDigit(digitW) == want then return true end
-		if det and typeof(fireclickdetector) == "function" and round <= 4 then
+		local shown = keypadSlotDigit(digitW)
+		if shown == want then return true end
+		if det and typeof(fireclickdetector) == "function" and round <= 5 then
 			pcall(fireclickdetector, det)
 		elseif dw and VIM then
 			screenClickPart(dw)
@@ -2272,7 +2252,12 @@ local function pressKeypadDigit(pad, w, want, force)
 			local btn = buttons[want]
 			if btn then clickButtonAt(btn) end
 		end
-		task.wait(0.35)
+		task.wait(0.3)
+		-- If the Readout is unreadable and we cycled past, stop counting.
+		local after = keypadSlotDigit(digitW)
+		if shown == nil and after == nil and round >= 6 then
+			return false -- cannot verify, cannot cycle blindly forever
+		end
 	end
 	return keypadSlotDigit(digitW) == want
 end
@@ -2962,6 +2947,20 @@ local function buildGui()
 		Title = "Hotkeys",
 		Content = "N toggles Noclip, V toggles Fly.",
 	})
+	movSec:Toggle({
+		Name = "Anti Kill", Default = State.antiKill, Flag = "ura_antikill",
+		Callback = function(v)
+			State.antiKill = v
+		end,
+	})
+	movSec:Slider({
+		Name = "Trigger radius", Min = 5, Max = 50, Default = State.antiKillRadius, Suffix = "studs", Flag = "ura_akr",
+		Callback = function(v) State.antiKillRadius = v end,
+	})
+	movSec:Slider({
+		Name = "Flee distance", Min = 20, Max = 500, Default = State.antiKillFlee, Suffix = "studs", Flag = "ura_akf",
+		Callback = function(v) State.antiKillFlee = v end,
+	})
 	local spdSec = movMain:Section({ Name = "Speed", Side = 2 })
 	spdSec:Slider({
 		Name = "Walk speed", Min = 16, Max = 150, Default = State.speed, Flag = "ura_speed",
@@ -3405,6 +3404,7 @@ pcall(function()
 end)
 
 local accDist, accCode, accText, accFb = 0, 0, 0, 0
+local accAntiKill = 0
 local noteFlag, noteFlagAt = "?", 0
 trackConnection(RunService.Heartbeat:Connect(function(dt)
 	if not State.running then return end
@@ -3417,6 +3417,44 @@ trackConnection(RunService.Heartbeat:Connect(function(dt)
 	-- the HealthChanged signal fires, this clamps it back every frame.
 	if State.godmode and hum and hum.Parent and hum.Health < hum.MaxHealth then
 		pcall(function() hum.Health = hum.MaxHealth end)
+	end
+	-- Anti Kill: the monster crossed the trigger radius -> teleport away.
+	if State.antiKill then
+		accAntiKill = accAntiKill + dt
+		if accAntiKill >= 0.2 then
+			accAntiKill = 0
+			local hrp = myHRP()
+			local mPart = nil
+			local ver = workspace:FindFirstChild("VER")
+			if ver then
+				local _, p = resolveTarget(ver)
+				mPart = p
+			else
+				for inst, e in pairs(Tracked) do
+					if e.kind == "monster" and e.part and inWorkspace(inst) then
+						mPart = e.part
+						break
+					end
+				end
+			end
+			if hrp and mPart then
+				local away = (hrp.Position - mPart.Position).Magnitude
+				if away <= State.antiKillRadius then
+					local dir = (hrp.Position - mPart.Position)
+					if dir.Magnitude < 0.1 then
+						dir = Vector3.new(0, 0, 1)
+					end
+					dir = Vector3.new(dir.X, 0, dir.Z)
+					if dir.Magnitude < 0.1 then
+						dir = Vector3.new(1, 0, 0)
+					end
+					dir = dir.Unit
+					local dest = mPart.Position + dir * State.antiKillFlee + Vector3.new(0, 3, 0)
+					pcall(function() hrp.CFrame = CFrame.new(dest) end)
+					notify("Anti Kill", "Monster at " .. math.floor(away) .. " studs — fled " .. State.antiKillFlee .. " studs", "run")
+				end
+			end
+		end
 	end
 	if State.noclip then
 		local char = myCharacter()
