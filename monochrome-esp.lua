@@ -169,7 +169,7 @@ local HIDDEN_KEYS_TOTAL = 4
 local LOCK_PARTS = { "Cube.028", "Cube.035", "Cube.031", "Cube.033" }
 local ELEVATOR_PART = "Cylinder.002"
 -- Closets / hiding spots
-local CLOSET_NAMES = { "closet", "armario", "ropero", "wardrobe", "locker", "hideout", "hiding" }
+local CLOSET_NAMES = { "closet", "armario", "ropero", "wardrobe", "locker", "hideout", "hiding", "hide", "hidespot", "hidingspot" }
 local HIDE_WORDS = { "hide", "esconder", "esconderse", "ocultar" }
 
 local State = {
@@ -194,6 +194,9 @@ local State = {
 	fly = false,
 	instacollect = false, -- grab keys the moment you walk into range
 	collectRadius = 12, -- pickup radius for Insta Collect (studs)
+	playerEsp = false, -- see other players (trolling tab)
+	visit = false, -- visit-loop: TP to each player in turn
+	visitDelay = 3,
 	instantPrompt = false,
 	fullbright = false,
 	autowin = false,
@@ -207,6 +210,7 @@ local State = {
 	colKey = WHITE,
 	colCode = WHITE,
 	colCloset = WHITE,
+	colPlayer = WHITE,
 }
 
 if not HasDrawing then
@@ -315,6 +319,7 @@ local function kindColor(kind)
 	if kind == "monster" then return State.colMonster end
 	if kind == "key" then return State.colKey end
 	if kind == "closet" then return State.colCloset end
+	if kind == "player" then return State.colPlayer end
 	return State.colCode
 end
 
@@ -322,6 +327,7 @@ local function kindTitle(kind)
 	if kind == "monster" then return "MONSTER" end
 	if kind == "key" then return "KEY" end
 	if kind == "closet" then return "CLOSET" end
+	if kind == "player" then return "PLAYER" end
 	return "NOTE"
 end
 
@@ -810,6 +816,7 @@ local function isKindEnabled(kind)
 	if kind == "key" then return State.keys end
 	if kind == "code" then return State.codes end
 	if kind == "closet" then return State.closets end
+	if kind == "player" then return State.playerEsp end
 	return false
 end
 
@@ -869,7 +876,7 @@ restoreChamForFn = function(target)
 	end
 end
 
-local function applyMaterialChams(on)
+local function applyMaterialChams(on, quiet)
 	State.matChams = on
 	if not on then
 		for part, o in pairs(ChamOrig) do
@@ -893,13 +900,22 @@ local function applyMaterialChams(on)
 			applyChamToTarget(e.target, kindColor(e.kind))
 		end
 	end
+	local n = 0
+	for _ in pairs(ChamOrig) do n = n + 1 end
+	if on and not quiet then
+		if n == 0 then
+			notify("URANIUM", "Material chams: no targets — enable an ESP kind first", "info")
+		else
+			notify("URANIUM", "Material chams ON (" .. n .. " parts)", "sparkles")
+		end
+	end
 end
 
 -- Re-apply after transparency / flat / color changes.
 local function refreshChamsIfOn()
 	if not State.matChams then return end
-	applyMaterialChams(false)
-	applyMaterialChams(true)
+	applyMaterialChams(false, true)
+	applyMaterialChams(true, true)
 end
 
 local function addEntry(inst)
@@ -963,6 +979,33 @@ local function forceEntry(inst, kind, label)
 	Tracked[inst] = { kind = kind, target = target, part = part, boxSize = boxSizeOf(target, part), hl = hl, bb = bb, txt = txt, draw = nil, digits = digits, label = label, root = inst }
 end
 
+-- Structural closet pass: Hide prompts AND Hide click detectors anywhere
+-- in the hierarchy (hiding may not use ProximityPrompts at all).
+local function scanClosetHosts()
+	if not State.closets then return end
+	for _, inst in ipairs(workspace:GetDescendants()) do
+		if inst:IsA("ProximityPrompt") and not isOurEsp(inst) then
+			local host = hidePromptHost(inst)
+			if host and not Tracked[host] and inWorkspace(host) then
+				local target, part = resolveTarget(host)
+				if target and part then
+					local hl, bb, txt = makeEspObjects(target, part)
+					Tracked[host] = { kind = "closet", target = target, part = part, boxSize = boxSizeOf(target, part), hl = hl, bb = bb, txt = txt, digits = nil, label = "CLOSET", root = host }
+				end
+			end
+		elseif inst:IsA("ClickDetector") and not isOurEsp(inst) then
+			local host = inst.Parent
+			if typeof(host) == "Instance" and not Tracked[host] and inWorkspace(host)
+				and (host:IsA("BasePart") or host:IsA("Model") or host:IsA("Tool")) then
+				local hay = lowerName(inst) .. " " .. lowerName(host)
+				if matchesAny(hay, HIDE_WORDS) or matchesAny(hay, CLOSET_NAMES) then
+					pcall(forceEntry, host, "closet", "CLOSET")
+				end
+			end
+		end
+	end
+end
+
 -- Structural pass over the real map: CodeNote (Printed > Digits is a plain
 -- TextLabel, not a SurfaceGui, so the text scan can never resolve its part)
 -- and HiddenKey folders (classify ignores Folder instances).
@@ -1001,6 +1044,7 @@ local function fullScan()
 		end
 	end
 	pcall(scanStructural)
+	if State.closets then pcall(scanClosetHosts) end
 	scanCodeTexts()
 end
 
@@ -1811,6 +1855,22 @@ local function scanLockPrompts(limit)
 	return out
 end
 
+-- Player ESP: marks other players (for trolling/visiting).
+local function scanPlayers()
+	if not State.playerEsp then return end
+	for _, plr in ipairs(Players:GetPlayers()) do
+		if plr ~= LocalPlayer and plr.Character and inWorkspace(plr.Character) then
+			if not Tracked[plr.Character] then
+				local target, part = resolveTarget(plr.Character)
+				if target and part then
+					local hl, bb, txt = makeEspObjects(target, part)
+					Tracked[plr.Character] = { kind = "player", target = target, part = part, boxSize = boxSizeOf(target, part), hl = hl, bb = bb, txt = txt, digits = nil, label = "PLAYER", root = plr.Character }
+				end
+			end
+		end
+	end
+end
+
 local function findEntryPanel()
 	for _, inst in ipairs(workspace:GetDescendants()) do
 		if inst:IsA("Model") or inst:IsA("BasePart") then
@@ -1987,8 +2047,9 @@ local function pressPanelDigits(panelModel, code)
 end
 
 -- Structural key grab: HiddenKey{i} > KeyPrompt. Teleports onto the
--- prompt part, fires, and verifies via inventory count or removal.
-local function grabHiddenKey(hk)
+-- prompt part, fires, verifies via inventory count or removal, then goes
+-- back to the given home position (or stays where it started).
+local function grabHiddenKey(hk, homeOverride)
 	if typeof(hk) ~= "Instance" then return false end
 	local before = countKeysHeld()
 	local prompt = keyPromptIn(hk)
@@ -1996,7 +2057,7 @@ local function grabHiddenKey(hk)
 	if not prompt or not part then return false end
 	prepPrompt(prompt)
 	local hrp = myHRP()
-	local home = (hrp and hrp.CFrame) or nil
+	local home = homeOverride or ((hrp and hrp.CFrame) or nil)
 	for _ = 1, 4 do
 		if not State.autowin or not State.running then return false end
 		if not inWorkspace(hk) then return true end
@@ -2052,63 +2113,23 @@ local function autoWinLoop()
 	while State.autowin and State.running do
 		waitRespawn()
 		if not State.autowin then break end
+		local hrp0 = myHRP()
+		local home = (hrp0 and hrp0.CFrame) or nil
 
-		-- Phase 0: pry planks / boards blocking the way in
-		setStatus("AUTO WIN 1/5: clearing entrance")
-		notify("Auto Win", "Phase 1/5: clearing entrance", "door-open")
-		for _, t in ipairs(scanPrompts(PLANK_NAMES, nil, 12)) do
-			if not State.autowin then break end
-			waitRespawn()
-			usePrompt(t.prompt)
-			task.wait(0.25)
-		end
-		if not State.autowin then break end
-
-		-- Phase 1: open drawers/containers (keys hide inside)
-		setStatus("AUTO WIN 2/5: opening drawers")
-		notify("Auto Win", "Phase 2/5: opening drawers", "archive")
-		do
-			local seen = {}
-			for _, t in ipairs(scanPrompts(DRAWER_NAMES, nil, 60)) do
-				if not State.autowin then break end
-				waitRespawn()
-				local key = tostring(t.prompt:GetDebugId())
-				if not seen[key] then
-					seen[key] = true
-					usePrompt(t.prompt)
-					task.wait(0.2)
-				end
-			end
-		end
-		if not State.autowin then break end
-		fullScan()
-		scanCodeTexts()
-
-		-- Phase 1b: read every note (fires Read prompts, code pops into UI)
-		setStatus("AUTO WIN: reading notes")
-		for _, e in pairs(Tracked) do
-			if not State.autowin then break end
-			if e.kind == "code" and e.root and inWorkspace(e.root) then
-				firePromptsIn(e.root)
-			end
-		end
-		task.wait(0.5)
-
-		-- Phase 2: collect the 4 keys (structural HiddenKey1-4 first,
-		-- verified with the inventory counter)
-		setStatus("AUTO WIN 3/5: collecting keys (" .. countKeysHeld() .. "/" .. KEYS_NEEDED .. ")")
-		notify("Auto Win", "Phase 3/5: collecting keys", "key")
+		-- 1/4: teleport to each key, grab it, come back home.
+		setStatus("AUTO WIN 1/4: collecting keys (" .. countKeysHeld() .. "/" .. KEYS_NEEDED .. ")")
+		notify("Auto Win", "Step 1/4: grabbing keys", "key")
 		for i = 1, HIDDEN_KEYS_TOTAL do
 			if not State.autowin then break end
 			if countKeysHeld() >= KEYS_NEEDED then break end
 			local hk = hiddenKeyFolder(i)
 			if hk and inWorkspace(hk) then
-				grabHiddenKey(hk)
-				setStatus("AUTO WIN 3/5: collecting keys (" .. countKeysHeld() .. "/" .. KEYS_NEEDED .. ")")
+				grabHiddenKey(hk, home)
+				setStatus("AUTO WIN 1/4: collecting keys (" .. countKeysHeld() .. "/" .. KEYS_NEEDED .. ")")
 			end
 			task.wait(0.15)
 		end
-		-- Fallback sweep for any key the structural pass missed
+		-- Leftovers the structural pass missed.
 		if State.autowin and State.running and countKeysHeld() < KEYS_NEEDED then
 			local guard = 0
 			while State.autowin and State.running and countKeysHeld() < KEYS_NEEDED and guard < 15 do
@@ -2122,16 +2143,17 @@ local function autoWinLoop()
 					if not target then break end
 				end
 				grabKey(target.inst)
-				setStatus("AUTO WIN 3/5: collecting keys (" .. countKeysHeld() .. "/" .. KEYS_NEEDED .. ")")
+				local h = myHRP()
+				if h and home then pcall(function() h.CFrame = home end) end
+				setStatus("AUTO WIN 1/4: collecting keys (" .. countKeysHeld() .. "/" .. KEYS_NEEDED .. ")")
 				task.wait(0.15)
 			end
 		end
 		if not State.autowin then break end
 
-		-- Phase 3: door locks (key equipped, structural Cube.* first,
-		-- then any *lock* prompt, then the generic deadbolt scan)
-		setStatus("AUTO WIN 4/5: opening deadbolts (" .. countKeysHeld() .. "/" .. KEYS_NEEDED .. " keys)")
-		notify("Auto Win", "Phase 4/5: opening exit", "lock-open")
+		-- 2/4: put the keys in the doors (key equipped, back home after).
+		setStatus("AUTO WIN 2/4: opening doors (" .. countKeysHeld() .. "/" .. KEYS_NEEDED .. " keys)")
+		notify("Auto Win", "Step 2/4: unlocking doors", "lock-open")
 		equipKeyTool()
 		for _, lname in ipairs(LOCK_PARTS) do
 			if not State.autowin then break end
@@ -2163,37 +2185,47 @@ local function autoWinLoop()
 			firePrompt(t.prompt)
 			task.wait(0.25)
 		end
-		for _, t in ipairs(scanPrompts(DEADBOLT_NAMES, NEVER_EXIT, 20)) do
-			if not State.autowin then break end
-			waitRespawn()
-			usePrompt(t.prompt)
-			task.wait(0.25)
-			if not State.autowin then break end
-			usePrompt(t.prompt)
-			task.wait(0.25)
+		do
+			local h = myHRP()
+			if h and home then pcall(function() h.CFrame = home end) end
 		end
 		if not State.autowin then break end
 
-		-- Phase 4: elevator panel + code (structural Keypad + Elevator first).
-		-- Retries the code hunt: notes may need their Read prompts fired
-		-- before the digits show up in the UI.
+		-- 3/4: read the code text.
+		setStatus("AUTO WIN 3/4: reading code")
+		notify("Auto Win", "Step 3/4: reading code", "eye")
 		local code = acquireCode()
 		do
 			local tries = 0
 			while (not code) and State.autowin and State.running and tries < 3 do
 				tries = tries + 1
-				setStatus("AUTO WIN 5/5: finding code (" .. tries .. "/3)")
+				setStatus("AUTO WIN 3/4: reading code (" .. tries .. "/3)")
 				for _, e in pairs(Tracked) do
 					if not State.autowin then break end
 					if e.kind == "code" and e.root and inWorkspace(e.root) then
 						firePromptsIn(e.root)
 					end
 				end
+				fireAllReadPrompts(20)
 				task.wait(0.8)
 				if not State.autowin then break end
 				code = scanPlayerGuiForCode() or getFoundCode() or readCodeNoteDirect()
 			end
 		end
+		if not State.autowin then break end
+		if not (code and #code == 4) then
+			setStatus("AUTO WIN: code not found — use View Code, then Put Code Now")
+			notify("Auto Win stuck", "Code not found — use View Code, then Put Code Now", "info")
+			State.autowin = false
+			if UiRefs.autoTgl then pcall(function() UiRefs.autoTgl:Set(false) end) end
+			break
+		end
+
+		-- 4/4: put the code in the panel, fire the elevator, done.
+		local method = typeof(fireclickdetector) == "function" and "fireclickdetector"
+			or (VIM and "VIM-screen" or "NONE")
+		setStatus("AUTO WIN 4/4: entering " .. code .. " (" .. method .. ")")
+		notify("Auto Win", "Step 4/4: entering " .. code, "hash")
 		local panel, panelPos = nil, nil
 		do
 			local pad = keypadModel()
@@ -2205,35 +2237,33 @@ local function autoWinLoop()
 				panel, panelPos = findEntryPanel()
 			end
 		end
-		if panel and panelPos then
-			waitRespawn()
-			instantTP(panelPos + Vector3.new(0, 4, 0))
-			if code and #code == 4 then
-				setStatus("AUTO WIN 5/5: entering code " .. code)
-				notify("Auto Win", "Entering code " .. code, "hash")
-				enterCodeAtPanel(panel, code)
-			end
-			-- Elevator prompt: fired several times so the ride registers.
-			for i = 1, 3 do
-				if not State.autowin then break end
-				local ep = elevatorPrompt()
-				if ep then
-					prepPrompt(ep)
-					firePrompt(ep)
-				else
-					firePromptsIn(panel)
-				end
-				task.wait(0.6)
-			end
-			task.wait(0.8)
+		if not panel then
+			setStatus("AUTO WIN: keypad not found. Code: " .. code)
+			notify("Auto Win stuck", "Keypad not found. Code: " .. code, "info")
+			State.autowin = false
+			if UiRefs.autoTgl then pcall(function() UiRefs.autoTgl:Set(false) end) end
+			break
 		end
-		if code then
-			setStatus("AUTO WIN done. Code: " .. code)
-			notify("Auto Win finished", "Code: " .. code .. " — check the elevator", "check")
-		else
-			setStatus("AUTO WIN done. Code not found, enter it manually.")
-			notify("Auto Win finished", "Code not found — read the NOTE marks", "info")
+		waitRespawn()
+		instantTP(panelPos + Vector3.new(0, 4, 0))
+		enterCodeAtPanel(panel, code)
+		for i = 1, 3 do
+			if not State.autowin then break end
+			local ep = elevatorPrompt()
+			if ep then
+				prepPrompt(ep)
+				firePrompt(ep)
+			else
+				firePromptsIn(panel)
+			end
+			task.wait(0.6)
 		end
+		do
+			local h = myHRP()
+			if h and home then pcall(function() h.CFrame = home end) end
+		end
+		setStatus("AUTO WIN done. Code: " .. code)
+		notify("Auto Win finished", "Code: " .. code .. " — game completed", "check")
 		State.autowin = false
 		if UiRefs.autoTgl then pcall(function() UiRefs.autoTgl:Set(false) end) end
 		break
@@ -2294,47 +2324,74 @@ local function viewCodeNow()
 	end)
 end
 
+-- Fire key-like prompts near a position (precise pickup when the prompt
+-- does not sit on the tracked part itself).
+local function fireKeyPromptsNear(pos, radius)
+	local fired = false
+	for _, inst in ipairs(workspace:GetDescendants()) do
+		if inst:IsA("ProximityPrompt") and not isOurEsp(inst) then
+			local part = promptRootPart(inst)
+			if part and (part.Position - pos).Magnitude <= radius then
+				local hay = lowerName(inst) .. " " .. lowerName(inst.Parent)
+					.. " " .. tostring(inst.ObjectText or ""):lower()
+					.. " " .. tostring(inst.ActionText or ""):lower()
+				if matchesAny(hay, KEY_NAMES)
+					or matchesAny(hay, { "pick", "take", "grab", "collect", "recoger", "agarrar" }) then
+					prepPrompt(inst)
+					firePrompt(inst)
+					fired = true
+				end
+			end
+		end
+	end
+	return fired
+end
+
 -- Insta Collect: grab nearby keys the moment you walk into range (no TP,
--- no Auto Win needed). Fires the entry, its target and a key-named parent
--- (prompts may sit on siblings, e.g. HiddenKey > KeyPrompt), plus one E
--- press per cycle for in-range prompts.
+-- no Auto Win needed). Goes straight for the HiddenKey container's real
+-- KeyPrompt, then any key-like prompt within 8 studs of the key.
 local function instaCollectLoop()
 	local cool = {}
 	while State.instacollect and State.running do
 		local hrp = myHRP()
 		if hrp then
 			local origin = hrp.Position
-			local firedAny = false
+			local pressed = false
 			for inst, e in pairs(Tracked) do
 				if not State.instacollect then break end
 				if e.kind == "key" and e.part and inWorkspace(inst) then
 					if (e.part.Position - origin).Magnitude <= State.collectRadius then
 						local last = cool[inst] or 0
-						if os.clock() - last >= 2 then
+						if os.clock() - last >= 0.8 then
 							cool[inst] = os.clock()
-							local root = e.root or inst
-							firePromptsIn(root)
-							if e.target and e.target ~= root then
-								firePromptsIn(e.target)
+							-- Direct: walk up to the HiddenKey container.
+							local node = e.root or inst
+							for i = 1, 4 do
+								if typeof(node) ~= "Instance" then break end
+								if string.find(lowerName(node), "hiddenkey", 1, true) then
+									local kp = keyPromptIn(node)
+									if kp then
+										prepPrompt(kp)
+										firePrompt(kp)
+										pressed = true
+									end
+									break
+								end
+								if node == workspace or node == game then break end
+								node = node.Parent
 							end
-							local par = root.Parent
-							if typeof(par) == "Instance" and par ~= workspace and par ~= game
-								and matchesAny(lowerName(par), KEY_NAMES) then
-								firePromptsIn(par)
+							if fireKeyPromptsNear(e.part.Position, 8) then
+								pressed = true
 							end
-							firedAny = true
 						end
 					end
 				end
 			end
-			if firedAny then
-				pressE(0.4)
+			if pressed then
+				pressE(0.3)
 			end
 		end
-		for i = 1, 3 do
-			if not State.instacollect or not State.running then break end
-			task.wait(0.1)
-		end
+		task.wait(0.15)
 	end
 end
 
@@ -2368,6 +2425,16 @@ local function putCodeNow()
 			setStatus("PUT CODE: panel not found. Code: " .. code)
 			notify("Put Code", "Panel not found. Code: " .. code, "info")
 			return
+		end
+		do
+			local method = typeof(fireclickdetector) == "function" and "fireclickdetector"
+				or (VIM and "VIM-screen" or "NONE")
+			notify("Put Code", "Keypad found, pressing via " .. method, "info")
+			if method == "NONE" then
+				setStatus("PUT CODE: no click method on this executor. Code: " .. code)
+				notify("Put Code", "Executor can't click — type " .. code .. " manually", "alert")
+				return
+			end
 		end
 		local hrp = myHRP()
 		if not hrp then
@@ -2750,6 +2817,144 @@ local function buildGui()
 	return window
 end
 
+local function visitLoop()
+	while State.visit and State.running do
+		local others = {}
+		for _, plr in ipairs(Players:GetPlayers()) do
+			if plr ~= LocalPlayer and plr.Character and plr.Character:FindFirstChild("HumanoidRootPart") then
+				others[#others + 1] = plr
+			end
+		end
+		if #others > 0 then
+			local target = others[math.random(#others)]
+			local hrp = myHRP()
+			if hrp and target.Character then
+				pcall(function() hrp.CFrame = target.Character.HumanoidRootPart.CFrame + Vector3.new(3, 0, 0) end)
+				notify("Visit", "Visiting " .. target.Name, "user")
+			end
+		end
+		local delay = State.visitDelay or 3
+		for i = 1, delay * 10 do
+			if not State.visit or not State.running then break end
+			task.wait(0.1)
+		end
+	end
+end
+
+-- ===================== TROLL TAB =====================
+
+local function buildTrollTab()
+	local trollTab = Window:Tab({ Name = "Trolling", Icon = "skull" })
+	local trollMain = trollTab:SubTab({ Name = "Main", Icon = "user" })
+	
+	local trollSec = trollMain:Section({ Name = "Players", Side = 1 })
+	UiRefs.playerEspTgl = trollSec:Toggle({
+		Name = "Player ESP", Default = State.playerEsp, Flag = "ura_playeresp",
+		Callback = function(v)
+			State.playerEsp = v
+			if v then fullScan() else clearKind("player") end
+		end,
+	})
+	trollSec:Colorpicker({
+		Name = "Player color", Default = State.colPlayer, Flag = "ura_colplayer",
+		Callback = function(v)
+			State.colPlayer = v
+			applyKindColors("player")
+		end,
+	})
+	trollSec:Button({
+		Name = "TP to Monster (VER)",
+		Callback = function()
+			local ver = workspace:FindFirstChild("VER")
+			if ver then
+				local _, part = resolveTarget(ver)
+				if part then
+					local hrp = myHRP()
+					if hrp then
+						pcall(function() hrp.CFrame = part.CFrame + Vector3.new(0, 3, 0) end)
+						notify("Troll", "Teleported to monster", "skull")
+					end
+				else
+					notify("Troll", "Monster found but no part to TP to", "alert")
+				end
+			else
+				notify("Troll", "VER not found in workspace", "alert")
+			end
+		end,
+	})
+	trollSec:Button({
+		Name = "TP Monster to Me",
+		Callback = function()
+			local ver = workspace:FindFirstChild("VER")
+			local hrp = myHRP()
+			if ver and hrp then
+				local _, part = resolveTarget(ver)
+				if part then
+					pcall(function() part.CFrame = hrp.CFrame + Vector3.new(5, 0, 0) end)
+					notify("Troll", "Monster teleported to you", "skull")
+				end
+			else
+				notify("Troll", "VER or you not found", "alert")
+			end
+		end,
+	})
+	trollSec:Toggle({
+		Name = "Visit loop (TP to each player)", Default = State.visit, Flag = "ura_visit",
+		Callback = function(v)
+			State.visit = v
+			if v then task.spawn(visitLoop) end
+		end,
+	})
+	trollSec:Slider({
+		Name = "Visit delay", Min = 1, Max = 10, Default = 3, Suffix = "s", Flag = "ura_visitdelay",
+		Callback = function(v) State.visitDelay = v end,
+	})
+	
+	local baitSec = trollMain:Section({ Name = "Bait", Side = 2 })
+	baitSec:Button({
+		Name = "Bait TP (random player to you)",
+		Callback = function()
+			local others = {}
+			for _, plr in ipairs(Players:GetPlayers()) do
+				if plr ~= LocalPlayer and plr.Character and plr.Character:FindFirstChild("HumanoidRootPart") then
+					others[#others + 1] = plr
+				end
+			end
+			if #others == 0 then
+				notify("Bait", "No other players found", "info")
+				return
+			end
+			local target = others[math.random(#others)]
+			local hrp = myHRP()
+			if hrp and target.Character then
+				pcall(function() target.Character.HumanoidRootPart.CFrame = hrp.CFrame + Vector3.new(3, 0, 0) end)
+				notify("Bait", "Teleported " .. target.Name .. " to you", "user")
+			end
+		end,
+	})
+	baitSec:Button({
+		Name = "Bait TP (you to random player)",
+		Callback = function()
+			local others = {}
+			for _, plr in ipairs(Players:GetPlayers()) do
+				if plr ~= LocalPlayer and plr.Character and plr.Character:FindFirstChild("HumanoidRootPart") then
+					others[#others + 1] = plr
+				end
+			end
+			if #others == 0 then
+				notify("Bait", "No other players found", "info")
+				return
+			end
+			local target = others[math.random(#others)]
+			local hrp = myHRP()
+			if hrp and target.Character then
+				pcall(function() hrp.CFrame = target.Character.HumanoidRootPart.CFrame + Vector3.new(3, 0, 0) end)
+				notify("Bait", "Teleported you to " .. target.Name, "user")
+			end
+		end,
+	})
+end
+
 -- ===================== STARTUP =====================
 
 EspFolder = Instance.new("Folder")
@@ -2860,6 +3065,7 @@ applySpeed()
 fullScan()
 
 Window = buildGui()
+buildTrollTab()
 -- Save Zolar holders so Unload can fully destroy the GUI.
 pcall(function()
 	if getgenv and getgenv().Zolar then
@@ -2913,6 +3119,8 @@ trackConnection(RunService.Heartbeat:Connect(function(dt)
 	if doText then
 		accText = 0
 		if State.codes then scanCodeTexts() end
+		if State.closets then pcall(scanClosetHosts) end
+		if State.playerEsp then pcall(scanPlayers) end
 	end
 	if not doDist and not doCode then return end
 	local origin = rootPosition()
@@ -2989,10 +3197,10 @@ do
 		if map:FindFirstChild(HIDDEN_KEY_PREFIX .. i) then hkFound = hkFound + 1 end
 	end
 	if hkFound == 0 then missing[#missing + 1] = "HiddenKey1-4" end
-	if #missing > 0 then
-		notify("URANIUM", "Not found: " .. table.concat(missing, ", ") .. " — game may have renamed objects", "alert")
+if #missing > 0 then
+			notify("URANIUM", "Not found: " .. table.concat(missing, ", ") .. " — game may have renamed objects", "alert")
+		end
 	end
-end
 
 -- Discord invite on load (copied to clipboard so joining is one paste away).
 pcall(function()
@@ -3016,7 +3224,7 @@ function Api.Unload()
 	State.godmode = false
 	State.matChams = false
 	State.shaderChams = false
-	applyMaterialChams(false)
+	applyMaterialChams(false, true)
 	applyShaderChams(false)
 	for _, c in ipairs(GodConns) do
 		pcall(function() c:Disconnect() end)

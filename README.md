@@ -79,9 +79,13 @@ Menu key: **RightShift**. In first person press **M** (game's own key) to free t
 - Pickup radius slider (Insta Collect range).
 - Live status label.
 
-**Settings**
-- Theme config (built-in), rescan world button, copy-Discord button, unload
-  button, help.
+**Trolling**
+- Player ESP: marks other players with name + distance.
+- TP to Monster (VER): teleports you to the monster.
+- TP Monster to Me: pulls the monster to you (fun for killing it or trapping it).
+- Visit loop: auto-teleports you to a random player every N seconds.
+- Bait TP (random player to you): yanks a random player to your position.
+- Bait TP (you to random player): teleports you to a random player.
 
 On every load the script shows the Discord invite and copies it to the
 clipboard (`DISCORD_INVITE` at the top of the script — set your real link).
