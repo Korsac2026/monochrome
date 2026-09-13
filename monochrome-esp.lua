@@ -209,6 +209,7 @@ local State = {
 	fullbright = false,
 	autowin = false,
 	autokeys = false,
+	autoPutCode = false, -- automatically enter the code when found
 	speed = 16, -- WalkSpeed
 	flySpeed = 70,
 	maxDist = 500,
@@ -1778,16 +1779,54 @@ local function applyGodmode(on)
 	for _, v in ipairs(livesValueCandidates()) do
 		lockLivesValue(v)
 	end
-	GodConns[#GodConns + 1] = LocalPlayer.CharacterAdded:Connect(function(char)
+	-- Lock any "dead" / "isDead" BoolValues to false
+	local function lockDeadValues(container)
+		if typeof(container) ~= "Instance" then return end
+		pcall(function()
+			for _, d in ipairs(container:GetDescendants()) do
+				if d:IsA("BoolValue") then
+					local n = d.Name:lower()
+					if n == "dead" or n == "isdead" or n == "muerte" or n == "muerto" then
+						pcall(function() d.Value = false end)
+						GodConns[#GodConns + 1] = d.Changed:Connect(function()
+							if State.godmode then pcall(function() d.Value = false end) end
+						end)
+					end
+				end
+			end
+		end)
+	end
+	lockDeadValues(LocalPlayer)
+	local char = myCharacter()
+	if char then lockDeadValues(char) end
+	-- Hook Humanoid.Died to force health back immediately
+	local hum = myHumanoid()
+	if hum then
+		GodConns[#GodConns + 1] = hum.Died:Connect(function()
+			if not State.godmode then return end
+			pcall(function()
+				hum.Health = hum.MaxHealth
+			end)
+		end)
+	end
+	GodConns[#GodConns + 1] = LocalPlayer.CharacterAdded:Connect(function(newChar)
 		if not State.godmode then return end
-		task.wait(1)
+		task.wait(0.5)
 		if not State.godmode or not State.running then return end
-		armGodHumanoid(char:FindFirstChildOfClass("Humanoid"))
+		local newHum = newChar:FindFirstChildOfClass("Humanoid")
+		if newHum then
+			armGodHumanoid(newHum)
+			GodConns[#GodConns + 1] = newHum.Died:Connect(function()
+				if State.godmode then pcall(function() newHum.Health = newHum.MaxHealth end) end
+			end)
+		end
 		for _, v in ipairs(livesValueCandidates()) do
 			lockLivesValue(v)
 		end
+		lockDeadValues(newChar)
+		lockDeadValues(LocalPlayer)
 	end)
-	notify("URANIUM", "Infinite Lives ON (health + lives locked)", "heart")
+	notify("URANIUM", "Infinite Lives ON (health + lives + death locked)", "heart")
 end
 
 local function pressE(holdTime)
@@ -2698,15 +2737,13 @@ local function fireKeyPromptsNear(pos, radius)
 	return fired
 end
 
--- Insta Collect: grab nearby keys the moment you walk into range.
--- Checks HiddenKey folders and any tracked keys within pickup radius.
+-- Insta Collect: grab nearby keys instantly through drawers and walls
 local function instaCollectLoop()
 	while State.instacollect and State.running do
 		local hrp = myHRP()
 		if hrp then
-			local origin = hrp.Position
+			local home = hrp.CFrame
 			local radius = State.collectRadius or 14
-			local grabbed = false
 
 			-- Direct check for HiddenKey1-4 folders
 			for i = 1, HIDDEN_KEYS_TOTAL do
@@ -2714,13 +2751,23 @@ local function instaCollectLoop()
 				local hk = hiddenKeyFolder(i)
 				if hk and inWorkspace(hk) then
 					local part = keyPartIn(hk)
-					if part and (part.Position - origin).Magnitude <= radius then
-						local kp = keyPromptIn(hk)
-						if kp and kp.Enabled then
-							prepPrompt(kp)
-							pcall(function() kp.HoldDuration = 0 end)
-							firePrompt(kp, true)
-							grabbed = true
+					if part then
+						local dist = (part.Position - home.Position).Magnitude
+						if dist <= radius then
+							local kp = keyPromptIn(hk)
+							if kp then
+								pcall(function() hrp.CFrame = part.CFrame + Vector3.new(0, 0.5, 0) end)
+								pcall(function()
+									kp.MaxActivationDistance = 9999
+									kp.Enabled = true
+									kp.HoldDuration = 0
+								end)
+								prepPrompt(kp)
+								firePrompt(kp, true)
+								pressE(0.08)
+								task.wait(0.05)
+								pcall(function() hrp.CFrame = home end)
+							end
 						end
 					end
 				end
@@ -2730,18 +2777,38 @@ local function instaCollectLoop()
 			for inst, e in pairs(Tracked) do
 				if not State.instacollect then break end
 				if e.kind == "key" and e.part and inWorkspace(inst) then
-					if (e.part.Position - origin).Magnitude <= radius then
-						firePromptsIn(inst)
-						if e.root and e.root ~= inst then firePromptsIn(e.root) end
-						if fireKeyPromptsNear(e.part.Position, radius) then
-							grabbed = true
+					local dist = (e.part.Position - home.Position).Magnitude
+					if dist <= radius then
+						pcall(function() hrp.CFrame = e.part.CFrame + Vector3.new(0, 0.5, 0) end)
+						for _, d in ipairs(inst:GetDescendants()) do
+							if d:IsA("ProximityPrompt") then
+								pcall(function()
+									d.MaxActivationDistance = 9999
+									d.Enabled = true
+									d.HoldDuration = 0
+								end)
+								prepPrompt(d)
+								firePrompt(d, true)
+							end
 						end
+						if e.root and e.root ~= inst then
+							for _, d in ipairs(e.root:GetDescendants()) do
+								if d:IsA("ProximityPrompt") then
+									pcall(function()
+										d.MaxActivationDistance = 9999
+										d.Enabled = true
+										d.HoldDuration = 0
+									end)
+									prepPrompt(d)
+									firePrompt(d, true)
+								end
+							end
+						end
+						pressE(0.08)
+						task.wait(0.05)
+						pcall(function() hrp.CFrame = home end)
 					end
 				end
-			end
-
-			if grabbed then
-				pressE(0.1)
 			end
 		end
 		task.wait(0.04)
@@ -2809,6 +2876,20 @@ local function putCodeNow()
 		setStatus("PUT CODE done: " .. code)
 		notify("Put Code done", "Code: " .. code, "check")
 	end)
+end
+
+local function autoPutCodeLoop()
+	while State.autoPutCode and State.running do
+		local code = acquireCode() or getFoundCode() or readCodeNoteDirect() or scanPlayerGuiForCode()
+		if code and #code == 4 then
+			notify("Auto Put Code", "Code found: " .. code .. " — typing at panel...", "hash")
+			putCodeNow()
+			State.autoPutCode = false
+			if UiRefs.autoPutCodeTgl then pcall(function() UiRefs.autoPutCodeTgl:Set(false) end) end
+			break
+		end
+		task.wait(1)
+	end
 end
 
 -- ===================== ZOLAR UI =====================
@@ -3116,6 +3197,13 @@ local function buildGui()
 		Name = "Put Code Now",
 		Callback = function() putCodeNow() end,
 	})
+	UiRefs.autoPutCodeTgl = autoSec:Toggle({
+		Name = "Auto Put Code (when found)", Default = State.autoPutCode, Flag = "ura_autoputcode",
+		Callback = function(v)
+			State.autoPutCode = v
+			if v then task.spawn(autoPutCodeLoop) end
+		end,
+	})
 	autoSec:Paragraph({
 		Title = "What it does",
 		Content = "Auto Win: 1 clears entrance, 2 opens drawers, 3 grabs HiddenKey1-4 (inventory-checked), 4 opens the Cube door locks, 5 hunts the code, types it on the Keypad and fires the elevator. Auto Use Keys spends held keys on nearby exits. Put Code Now types the code once. View Code shows the code + copies it, no walking needed.",
@@ -3186,7 +3274,23 @@ local function buildGui()
 		Content = "RightShift toggles this menu. E interacts, F torch, Shift sprint. In first person press M to free the mouse.",
 	})
 
-	window:Watermark({ Name = "URANIUM" })
+	local wm = window:Watermark({ Name = "URANIUM", Icon = "radioactive" })
+	pcall(function()
+		if wm and wm.Instance then
+			local titleLbl = Instance.new("TextLabel")
+			titleLbl.Name = "UraniumWatermarkTitle"
+			titleLbl.Text = "URANIUM"
+			titleLbl.Font = Enum.Font.GothamBold
+			titleLbl.TextSize = 14
+			titleLbl.TextColor3 = Color3.fromRGB(245, 245, 245)
+			titleLbl.BackgroundTransparency = 1
+			titleLbl.Size = UDim2.fromOffset(0, 16)
+			titleLbl.AutomaticSize = Enum.AutomaticSize.X
+			titleLbl.LayoutOrder = 1
+			titleLbl.ZIndex = 62
+			titleLbl.Parent = wm.Instance
+		end
+	end)
 	return window
 end
 
@@ -3342,13 +3446,49 @@ local function buildTrollTab()
 	trollSec:Button({
 		Name = "TP Monster to Me",
 		Callback = function()
-			local mPart = getMonsterPart()
 			local hrp = myHRP()
-			if mPart and hrp then
-				pcall(function() mPart.CFrame = hrp.CFrame + Vector3.new(5, 0, 0) end)
+			if not hrp then
+				notify("Troll", "No character", "alert")
+				return
+			end
+			local dest = hrp.CFrame * CFrame.new(5, 0, 0)
+			local ver = workspace:FindFirstChild("VER") or workspace:FindFirstChild("ver")
+			if not ver then
+				for inst, e in pairs(Tracked) do
+					if e.kind == "monster" and inWorkspace(inst) then ver = inst break end
+				end
+			end
+			if not ver then
+				notify("Troll", "VER not found", "alert")
+				return
+			end
+			local moved = false
+			pcall(function()
+				if ver:IsA("Model") then
+					local mhrp = ver:FindFirstChild("HumanoidRootPart") or ver.PrimaryPart
+					if mhrp then
+						mhrp.CFrame = dest
+						moved = true
+					else
+						ver:PivotTo(dest)
+						moved = true
+					end
+				elseif ver:IsA("BasePart") then
+					ver.CFrame = dest
+					moved = true
+				end
+			end)
+			if not moved then
+				local mPart = getMonsterPart()
+				if mPart then
+					pcall(function() mPart.CFrame = dest end)
+					moved = true
+				end
+			end
+			if moved then
 				notify("Troll", "Monster teleported to you", "skull")
 			else
-				notify("Troll", "VER or you not found", "alert")
+				notify("Troll", "Failed to move monster", "alert")
 			end
 		end,
 	})
@@ -3384,22 +3524,37 @@ local function buildTrollTab()
 	baitSec:Button({
 		Name = "TP Monster to All Players",
 		Callback = function()
-			local mPart = getMonsterPart()
-			if not mPart then
-				notify("Troll", "Monster not found", "alert")
+			local ver = workspace:FindFirstChild("VER") or workspace:FindFirstChild("ver")
+			if not ver then
+				for inst, e in pairs(Tracked) do
+					if e.kind == "monster" and inWorkspace(inst) then ver = inst break end
+				end
+			end
+			if not ver then
+				notify("Troll", "Monster (VER) not found", "alert")
 				return
 			end
 			local count = 0
 			for _, plr in ipairs(Players:GetPlayers()) do
 				if plr ~= LocalPlayer and plr.Character and plr.Character:FindFirstChild("HumanoidRootPart") then
+					local pcf = plr.Character.HumanoidRootPart.CFrame
 					pcall(function()
-						mPart.CFrame = plr.Character.HumanoidRootPart.CFrame
+						if ver:IsA("Model") then
+							local mhrp = ver:FindFirstChild("HumanoidRootPart") or ver.PrimaryPart
+							if mhrp then
+								mhrp.CFrame = pcf
+							else
+								ver:PivotTo(pcf)
+							end
+						elseif ver:IsA("BasePart") then
+							ver.CFrame = pcf
+						end
 					end)
 					count = count + 1
 				end
 			end
 			if count > 0 then
-				notify("Troll", "Monster teleported to players!", "skull")
+				notify("Troll", "Monster teleported to " .. count .. " players!", "skull")
 			else
 				notify("Troll", "No other players found", "info")
 			end
@@ -3557,6 +3712,151 @@ do
 end
 applySpeed()
 fullScan()
+
+-- ===================== DISCORD GATE =====================
+-- Blocks cheat initialization until the user clicks "Copy Invite & Start".
+do
+	local gateGui = Instance.new("ScreenGui")
+	gateGui.Name = "UraniumGate"
+	gateGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+	gateGui.ResetOnSpawn = false
+	gateGui.IgnoreGuiInset = true
+	local GetHui = gethui or function() return game:GetService("CoreGui") end
+	pcall(function() gateGui.Parent = GetHui() end)
+	if not gateGui.Parent then
+		pcall(function() gateGui.Parent = LocalPlayer:FindFirstChildOfClass("PlayerGui") end)
+	end
+
+	local bg = Instance.new("Frame")
+	bg.Name = "Backdrop"
+	bg.Size = UDim2.new(1, 0, 1, 0)
+	bg.BackgroundColor3 = Color3.fromRGB(5, 5, 8)
+	bg.BackgroundTransparency = 0.25
+	bg.BorderSizePixel = 0
+	bg.ZIndex = 100
+	bg.Parent = gateGui
+
+	local card = Instance.new("Frame")
+	card.Name = "Card"
+	card.AnchorPoint = Vector2.new(0.5, 0.5)
+	card.Position = UDim2.new(0.5, 0, 0.5, 0)
+	card.Size = UDim2.new(0, 390, 0, 230)
+	card.BackgroundColor3 = Color3.fromRGB(15, 15, 20)
+	card.BorderSizePixel = 0
+	card.ZIndex = 101
+	card.Parent = bg
+
+	local cardCorner = Instance.new("UICorner")
+	cardCorner.CornerRadius = UDim.new(0, 12)
+	cardCorner.Parent = card
+
+	local cardStroke = Instance.new("UIStroke")
+	cardStroke.Color = Color3.fromRGB(88, 101, 242)
+	cardStroke.Thickness = 1.5
+	cardStroke.Transparency = 0.2
+	cardStroke.Parent = card
+
+	local title = Instance.new("TextLabel")
+	title.Name = "Title"
+	title.Text = "URANIUM"
+	title.Font = Enum.Font.GothamBold
+	title.TextSize = 22
+	title.TextColor3 = Color3.fromRGB(245, 245, 245)
+	title.BackgroundTransparency = 1
+	title.Position = UDim2.new(0, 0, 0, 18)
+	title.Size = UDim2.new(1, 0, 0, 28)
+	title.ZIndex = 102
+	title.Parent = card
+
+	local subtitle = Instance.new("TextLabel")
+	subtitle.Name = "Subtitle"
+	subtitle.Text = "Join our Discord community to launch the cheat"
+	subtitle.Font = Enum.Font.GothamMedium
+	subtitle.TextSize = 13
+	subtitle.TextColor3 = Color3.fromRGB(175, 175, 185)
+	subtitle.BackgroundTransparency = 1
+	subtitle.Position = UDim2.new(0, 0, 0, 48)
+	subtitle.Size = UDim2.new(1, 0, 0, 20)
+	subtitle.ZIndex = 102
+	subtitle.Parent = card
+
+	local linkBox = Instance.new("Frame")
+	linkBox.Name = "LinkBox"
+	linkBox.AnchorPoint = Vector2.new(0.5, 0)
+	linkBox.Position = UDim2.new(0.5, 0, 0, 80)
+	linkBox.Size = UDim2.new(0, 330, 0, 36)
+	linkBox.BackgroundColor3 = Color3.fromRGB(25, 25, 32)
+	linkBox.BorderSizePixel = 0
+	linkBox.ZIndex = 102
+	linkBox.Parent = card
+
+	local linkCorner = Instance.new("UICorner")
+	linkCorner.CornerRadius = UDim.new(0, 6)
+	linkCorner.Parent = linkBox
+
+	local linkStroke = Instance.new("UIStroke")
+	linkStroke.Color = Color3.fromRGB(45, 45, 55)
+	linkStroke.Thickness = 1
+	linkStroke.Parent = linkBox
+
+	local linkText = Instance.new("TextLabel")
+	linkText.Name = "LinkText"
+	linkText.Text = DISCORD_INVITE
+	linkText.Font = Enum.Font.GothamBold
+	linkText.TextSize = 14
+	linkText.TextColor3 = Color3.fromRGB(114, 137, 218)
+	linkText.BackgroundTransparency = 1
+	linkText.Size = UDim2.new(1, 0, 1, 0)
+	linkText.ZIndex = 103
+	linkText.Parent = linkBox
+
+	local copyBtn = Instance.new("TextButton")
+	copyBtn.Name = "CopyButton"
+	copyBtn.AnchorPoint = Vector2.new(0.5, 0)
+	copyBtn.Position = UDim2.new(0.5, 0, 0, 134)
+	copyBtn.Size = UDim2.new(0, 240, 0, 42)
+	copyBtn.BackgroundColor3 = Color3.fromRGB(88, 101, 242)
+	copyBtn.BorderSizePixel = 0
+	copyBtn.Font = Enum.Font.GothamBold
+	copyBtn.TextSize = 15
+	copyBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+	copyBtn.Text = "Copy Invite & Start"
+	copyBtn.AutoButtonColor = true
+	copyBtn.ZIndex = 103
+	copyBtn.Parent = card
+
+	local btnCorner = Instance.new("UICorner")
+	btnCorner.CornerRadius = UDim.new(0, 8)
+	btnCorner.Parent = copyBtn
+
+	local info = Instance.new("TextLabel")
+	info.Name = "Info"
+	info.Text = "Click the button to copy the link and unlock the script"
+	info.Font = Enum.Font.Gotham
+	info.TextSize = 11
+	info.TextColor3 = Color3.fromRGB(130, 130, 140)
+	info.BackgroundTransparency = 1
+	info.Position = UDim2.new(0, 0, 0, 185)
+	info.Size = UDim2.new(1, 0, 0, 18)
+	info.ZIndex = 102
+	info.Parent = card
+
+	local passed = false
+	copyBtn.MouseButton1Click:Connect(function()
+		pcall(function()
+			if typeof(setclipboard) == "function" then
+				setclipboard(DISCORD_INVITE)
+			end
+		end)
+		passed = true
+		pcall(function() gateGui:Destroy() end)
+	end)
+
+	while not passed do
+		task.wait(0.1)
+	end
+	task.wait(0.15)
+end
 
 Window = buildGui()
 buildTrollTab()
