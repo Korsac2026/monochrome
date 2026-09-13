@@ -1,40 +1,53 @@
 # Monochrome ESP
 
-Script standalone para el juego **MONOCHROME** (PlaceId `134208374070897`).
-No depende de Uranium ni de ninguna librería. Proyecto aparte.
+Standalone script for **MONOCHROME** (PlaceId `134208374070897`).
+No Uranium, no libraries required. Separate project.
 
-## Qué incluye
+## Run
 
-1. **Monster ESP** — detecta al monstruo y lo marca con contorno + nombre + distancia.
-2. **Key ESP** — marca la ubicación de las llaves del mapa.
-3. **Code ESP** — marca keypads / notas / cajas fuertes y lee el código
-   si aparece en algún texto (pantalla, nota, prompt).
+```lua
+loadstring(game:HttpGet("https://raw.githubusercontent.com/Korsac2026/monochrome/main/monochrome-esp.lua"))()
+```
 
-Todo en blanco y negro (monocromo).
+## Features
 
-## Uso
+1. **Monster ESP** — highlights the monster (outline + name + distance).
+2. **Key ESP** — marks key locations on the map.
+3. **Code ESP** — marks WHERE the code IS (world notes / screens / papers
+   showing digits), NOT the keypad where you type it. Reads the code for you.
+4. **Noclip** — walk through walls.
+5. **Fly** — fly with WASD + Space (up) / LeftShift (down).
+6. **Speed** — WalkSpeed stepper: 16 / 24 / 32 / 50 / 75 / 100 / 150.
+7. **Auto Win** — flies to the 4 keys, grabs them (E), opens the deadbolts,
+   then flies to the elevator panel with the code.
 
-Ejecutá `monochrome-esp.lua` directamente en tu executor.
+All black & white (monochrome).
 
-- **RightShift**: muestra / oculta la GUI.
-- **X**: cierra el script y limpia todo el ESP.
-- La GUI es arrastrable desde el título.
+## GUI
 
-## Opciones en la GUI
+- Draggable from the title bar.
+- **RightShift**: show / hide.
+- **X**: closes the script and cleans up all ESP.
 
-| Opción | Qué hace |
+| Row | What it does |
 |---|---|
-| MONSTER ESP | Activa / apaga el ESP del monstruo |
-| KEY ESP | Activa / apaga el ESP de llaves |
-| CODE ESP | Activa / apaga el ESP de códigos |
-| NPC SCAN | Marca cualquier humanoide no-jugador como monstruo (por si el monstruo usa un nombre raro) |
-| MAX DIST | Distancia máxima del ESP (150m / 300m / 500m / 1000m / INF) |
+| MONSTER ESP | Toggles monster ESP |
+| KEY ESP | Toggles key ESP |
+| CODE ESP | Toggles code-location ESP |
+| NPC SCAN | Marks ANY non-player humanoid as monster (fallback if the monster uses a weird name) |
+| NOCLIP | Toggles noclip |
+| FLY | Toggles fly |
+| SPEED | WalkSpeed stepper (also scales fly speed) |
+| MAX DIST | ESP render distance (150m / 300m / 500m / 1000m / INF) |
+| AUTO WIN | Full auto-run: keys → deadbolts → elevator panel + code |
 
-## Ajustar nombres
+The status bar shows `monster:N  key:N  code:N  code:XXXX  keys:H/4`.
 
-Si el monstruo, las llaves o los códigos del juego usan otros nombres,
-editá las listas al inicio del script:
+## Tuning names
+
+If the monster, keys or panels ever use different names, edit the lists at
+the top of the script:
 
 - `MONSTER_NAMES` / `MONSTER_FOLDERS`
 - `KEY_NAMES`
-- `CODE_KINDS`
+- `ENTRY_NAMES` / `DEADBOLT_NAMES` (Auto Win navigation only)
