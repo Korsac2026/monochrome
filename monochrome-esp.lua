@@ -2419,10 +2419,15 @@ local function grabHiddenKey(hk, homeOverride)
 			if hrp and part and inWorkspace(part) then
 				-- Reference offset: 3 studs above the key part.
 				pcall(function() hrp.CFrame = part.CFrame + Vector3.new(0, 3, 0) end)
-				task.wait(0.15)
+				task.wait(0.3)
 			end
 		end
 		if not State.autowin then cleanup(false) return false end
+
+		-- Re-check: the game wakes the prompt once the player is near
+		-- (or once the drawer finished opening). Never fire a dead prompt.
+		prompt = keyPromptIn(hk) or prompt
+		part = keyPartIn(hk) or part
 
 		if promptUsable(prompt) and typeof(fireproximityprompt) == "function" then
 			-- Works from under the floor: LOS off + range 5000.
@@ -2491,9 +2496,13 @@ local function grabKey(inst)
 	return (not inWorkspace(inst)) or countKeysHeld() > before
 end
 
+-- Forward: Insta Collect loop, assigned below (autoWinLoop above spawns it).
+local instaCollectLoop = nil
+
 local function autoWinLoop()
 	-- Auto-collect ON during the run: every correct key we walk near gets
 	-- grabbed automatically (proximity loop). Restored at the end.
+	-- (instaCollectLoop is forward-declared above and assigned below.)
 	local prevInsta = State.instacollect
 	if not prevInsta then
 		State.instacollect = true
@@ -2763,7 +2772,7 @@ local function fireKeyPromptsNear(pos, radius)
 end
 
 -- Insta Collect: grab nearby keys instantly through drawers and walls
-local function instaCollectLoop()
+instaCollectLoop = function()
 	while State.instacollect and State.running do
 		local hrp = myHRP()
 		if hrp then
