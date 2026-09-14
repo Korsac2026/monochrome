@@ -171,6 +171,16 @@ local ELEVATOR_PART = "Cylinder.002"
 local CLOSET_NAMES = { "closet", "armario", "ropero", "wardrobe", "locker", "hideout", "hiding", "hide", "hidespot", "hidingspot" }
 local HIDE_WORDS = { "hide", "esconder", "esconderse", "ocultar" }
 
+-- Map root, cached (re-fetched if the folder is destroyed on round reset).
+-- Declared early: every scanner below depends on it.
+local CachedMap = nil
+local function mapRoot()
+	if CachedMap and CachedMap.Parent == workspace then return CachedMap end
+	local m = workspace:FindFirstChild(MAP_NAME)
+	CachedMap = m or workspace
+	return CachedMap
+end
+
 local State = {
 	running = true,
 	monster = true,
@@ -696,7 +706,7 @@ end
 -- code IS (plus readable values). Keypads are never marked here.
 local function scanCodeTexts()
 	if not State.codes then return end
-	local descs = workspace:GetDescendants()
+	local descs = mapRoot():GetDescendants()
 	for i = 1, #descs do
 		local d = descs[i]
 		if isOurEsp(d) then
@@ -707,8 +717,8 @@ local function scanCodeTexts()
 			if digits then
 				local part = adorneePartForText(d)
 				if part and not isEntryObject(part) and not isEntryObject(part.Parent) then
-					local hl, bb, txt, box, stroke, dot = makeEspObjects(part, part)
-					Tracked[d] = { kind = "code", target = part, part = part, boxSize = part.Size, hl = hl, bb = bb, txt = txt, box = box, stroke = stroke, dot = dot, digits = digits, label = "CODE", root = d }
+					local hl, bb, txt, stroke, dot = makeEspObjects(part, part)
+					Tracked[d] = { kind = "code", target = part, part = part, boxSize = part.Size, hl = hl, bb = bb, txt = txt, stroke = stroke, dot = dot, digits = digits, label = "CODE", root = d }
 				end
 			end
 		elseif d:IsA("ProximityPrompt") and not Tracked[d] then
@@ -717,8 +727,8 @@ local function scanCodeTexts()
 			if hideHost and not Tracked[hideHost] and State.closets then
 				local target, part = resolveTarget(hideHost)
 				if target and part then
-					local hl, bb, txt, box, stroke, dot = makeEspObjects(target, part)
-					Tracked[hideHost] = { kind = "closet", target = target, part = part, boxSize = boxSizeOf(target, part), hl = hl, bb = bb, txt = txt, box = box, stroke = stroke, dot = dot, digits = nil, label = "CLOSET", root = hideHost }
+					local hl, bb, txt, stroke, dot = makeEspObjects(target, part)
+					Tracked[hideHost] = { kind = "closet", target = target, part = part, boxSize = boxSizeOf(target, part), hl = hl, bb = bb, txt = txt, stroke = stroke, dot = dot, digits = nil, label = "CLOSET", root = hideHost }
 				end
 			end
 			-- A "read this" prompt marks its host as a code location.
@@ -726,8 +736,8 @@ local function scanCodeTexts()
 			if host and not Tracked[host] then
 				local target, part = resolveTarget(host)
 				if target and part then
-					local hl, bb, txt, box, stroke, dot = makeEspObjects(target, part)
-					Tracked[host] = { kind = "code", target = target, part = part, boxSize = boxSizeOf(target, part), hl = hl, bb = bb, txt = txt, box = box, stroke = stroke, dot = dot, digits = extractDigits(host), label = "NOTE", root = host }
+					local hl, bb, txt, stroke, dot = makeEspObjects(target, part)
+					Tracked[host] = { kind = "code", target = target, part = part, boxSize = boxSizeOf(target, part), hl = hl, bb = bb, txt = txt, stroke = stroke, dot = dot, digits = extractDigits(host), label = "NOTE", root = host }
 				end
 			end
 		elseif (d:IsA("StringValue") or d:IsA("IntValue") or d:IsA("NumberValue")) and not Tracked[d] then
@@ -744,8 +754,8 @@ local function scanCodeTexts()
 						part = p
 					end
 					if part and not isEntryObject(part) then
-						local hl, bb, txt, box, stroke, dot = makeEspObjects(part, part)
-						Tracked[d] = { kind = "code", target = part, part = part, boxSize = part.Size, hl = hl, bb = bb, txt = txt, box = box, stroke = stroke, dot = dot, digits = string.sub(val, 1, 8), label = "CODE", root = d }
+						local hl, bb, txt, stroke, dot = makeEspObjects(part, part)
+						Tracked[d] = { kind = "code", target = part, part = part, boxSize = part.Size, hl = hl, bb = bb, txt = txt, stroke = stroke, dot = dot, digits = string.sub(val, 1, 8), label = "CODE", root = d }
 					end
 				end
 			end
@@ -896,7 +906,7 @@ end
 -- Structural closet pass: Hide prompts, Hide click detectors, and closet models/parts
 local function scanClosetHosts()
 	if not State.closets then return end
-	for _, inst in ipairs(workspace:GetDescendants()) do
+	for _, inst in ipairs(mapRoot():GetDescendants()) do
 		if isOurEsp(inst) then
 			-- skip
 		elseif inst:IsA("ProximityPrompt") then
@@ -904,8 +914,8 @@ local function scanClosetHosts()
 			if host and not Tracked[host] and inWorkspace(host) then
 				local target, part = resolveTarget(host)
 				if target and part then
-					local hl, bb, txt, box, stroke, dot = makeEspObjects(target, part)
-					Tracked[host] = { kind = "closet", target = target, part = part, boxSize = boxSizeOf(target, part), hl = hl, bb = bb, txt = txt, box = box, stroke = stroke, dot = dot, digits = nil, label = "CLOSET", root = host }
+					local hl, bb, txt, stroke, dot = makeEspObjects(target, part)
+					Tracked[host] = { kind = "closet", target = target, part = part, boxSize = boxSizeOf(target, part), hl = hl, bb = bb, txt = txt, stroke = stroke, dot = dot, digits = nil, label = "CLOSET", root = host }
 				end
 			end
 		elseif inst:IsA("ClickDetector") then
@@ -956,13 +966,17 @@ local function scanStructural()
 end
 
 local function fullScan()
-	for _, inst in ipairs(workspace:GetDescendants()) do
+	-- Map-scoped (VER lives at workspace root, handled separately).
+	local scope = mapRoot()
+	for _, inst in ipairs(scope:GetDescendants()) do
 		if inst:IsA("Model") or inst:IsA("Tool") then
 			pcall(addEntry, inst)
 		elseif inst:IsA("BasePart") and inst.Parent and not (inst.Parent:IsA("Model") or inst.Parent:IsA("Tool")) then
 			pcall(addEntry, inst)
 		end
 	end
+	local ver = workspace:FindFirstChild("VER")
+	if ver then pcall(addEntry, ver) end
 	pcall(scanStructural)
 	if State.closets then pcall(scanClosetHosts) end
 	scanCodeTexts()
@@ -1611,7 +1625,7 @@ end
 -- Prompts whose host matches a name list (broad scan for autowin phases).
 local function scanPrompts(nameList, excludeList, limit)
 	local out = {}
-	for _, inst in ipairs(workspace:GetDescendants()) do
+	for _, inst in ipairs(mapRoot():GetDescendants()) do
 		if inst:IsA("ProximityPrompt") then
 			local host = inst.Parent
 			local scope = host and host.Parent or nil
@@ -1638,12 +1652,6 @@ local function scanPrompts(nameList, excludeList, limit)
 end
 
 -- ===================== MAP STRUCTURE (MONOCHROME) =====================
-
-local function mapRoot()
-	local m = workspace:FindFirstChild(MAP_NAME)
-	if m then return m end
-	return workspace
-end
 
 local function hiddenKeyFolder(i)
 	local map = mapRoot()
@@ -1719,7 +1727,7 @@ local function findKeypadByReadouts()
 		end
 		return nil
 	end
-	for _, inst in ipairs(workspace:GetDescendants()) do
+	for _, inst in ipairs(mapRoot():GetDescendants()) do
 		if not isOurEsp(inst) and (inst:IsA("TextLabel") or inst:IsA("TextButton")) then
 			local ok, t = pcall(function() return inst.Text end)
 			if ok and type(t) == "string" and #t == 1 and string.match(t, "%d") then
@@ -1737,30 +1745,36 @@ local function findKeypadByReadouts()
 	return best
 end
 
+local CachedPad = nil
 local function keypadModel()
 	local map = mapRoot()
-	local k = map:FindFirstChild("Keypad")
-	if k then return k end
+	local k = map ~= workspace and map:FindFirstChild("Keypad") or nil
+	if k then CachedPad = k return k end
+	if CachedPad and inWorkspace(CachedPad) then return CachedPad end
 	-- Fuzzy: any model with "keypad" in the name...
-	for _, inst in ipairs(workspace:GetDescendants()) do
+	for _, inst in ipairs(map:GetDescendants()) do
 		if inst:IsA("Model") and string.find(lowerName(inst), "keypad", 1, true) then
+			CachedPad = inst
 			return inst
 		end
 	end
 	-- ...or any model holding Digit1-4 anywhere in its hierarchy
 	-- (digits may be nested: Keypad > Panel > Digit1).
-	for _, inst in ipairs(workspace:GetDescendants()) do
+	for _, inst in ipairs(map:GetDescendants()) do
 		if inst:IsA("Model") and not isOurEsp(inst) then
 			local hits = 0
 			for w = 1, 4 do
 				if inst:FindFirstChild("Digit" .. w, true) then hits = hits + 1 end
 			end
-			if hits >= 3 then return inst end
+			if hits >= 3 then
+				CachedPad = inst
+				return inst
+			end
 		end
 	end
 	-- ...or the readout heuristic: group of 3-4 single-digit labels.
 	local byReadouts = findKeypadByReadouts()
-	if byReadouts then return byReadouts end
+	if byReadouts then CachedPad = byReadouts return byReadouts end
 	return nil
 end
 
@@ -1881,7 +1895,7 @@ end
 -- excluded.
 local function scanLockPrompts(limit)
 	local out = {}
-	for _, inst in ipairs(workspace:GetDescendants()) do
+	for _, inst in ipairs(mapRoot():GetDescendants()) do
 		if inst:IsA("ProximityPrompt") and not isOurEsp(inst) then
 			local host = inst.Parent
 			local scope = host and host.Parent or nil
@@ -1935,7 +1949,7 @@ local function panelAnchorPos(pad)
 end
 
 local function findEntryPanel()
-	for _, inst in ipairs(workspace:GetDescendants()) do
+	for _, inst in ipairs(mapRoot():GetDescendants()) do
 		if inst:IsA("Model") or inst:IsA("BasePart") or inst:IsA("Folder") then
 			local n = lowerName(inst)
 			local hit = string.find(n, "keypad", 1, true) or string.find(n, "panel", 1, true)
@@ -2016,7 +2030,7 @@ end
 -- ESP may not have marked yet). Used by the code hunt.
 local function fireAllReadPrompts(limit)
 	local n = 0
-	for _, inst in ipairs(workspace:GetDescendants()) do
+	for _, inst in ipairs(mapRoot():GetDescendants()) do
 		if inst:IsA("ProximityPrompt") and not isOurEsp(inst) then
 			local host = readPromptHost(inst)
 			if host and inWorkspace(host) then
@@ -2242,29 +2256,55 @@ end
 -- Pass 2: nearest drawer/open prompt near the key. In this game drawers
 -- are LOOSE parts (Cube.156/157…) with attachment-hosted DrawerPrompts,
 -- so name matching on the furniture NEVER hits — the prompt is the anchor.
+-- Round cache: HiddenKey folder -> its drawer container. Built once per
+-- AutoWin run with a SINGLE map scan (no GetBoundingBox: drawers here are
+-- loose parts matched by their DrawerPrompt anchor, verified live).
+local DrawerCache = nil
+
+local function buildDrawerCache()
+	DrawerCache = {}
+	local scope = mapRoot()
+	local okAll, all = pcall(function() return scope:GetDescendants() end)
+	if not okAll then return end
+	-- Index every live drawer prompt by anchor position (one pass).
+	local drawers = {}
+	for i = 1, #all do
+		local d = all[i]
+		if d:IsA("ProximityPrompt") and d.Enabled and not isOurEsp(d) then
+			if string.find(lowerName(d), "drawer", 1, true) then
+				local anchor = promptRootPart(d)
+				if anchor then drawers[#drawers+1] = { prompt = d, pos = anchor.Position } end
+			end
+		end
+	end
+	for i = 1, HIDDEN_KEYS_TOTAL do
+		local hk = scope:FindFirstChild(HIDDEN_KEY_PREFIX .. i)
+		if hk then
+			local part = keyPartIn(hk)
+			if part then
+				local best, bestDist = nil, 8
+				for j = 1, #drawers do
+					local dist = (drawers[j].pos - part.Position).Magnitude
+					if dist < bestDist then
+						local host = drawers[j].prompt.Parent
+						if host and host:IsA("Attachment") then host = host.Parent end
+						if host then best, bestDist = host, dist end
+					end
+				end
+				if best then DrawerCache[hk] = best end
+			end
+		end
+	end
+end
+
 local function drawerOfKey(keyPart)
 	if typeof(keyPart) ~= "Instance" or not keyPart:IsA("BasePart") then return nil end
 	local kpos = keyPart.Position
 	local scope = mapRoot()
 	local okAll, all = pcall(function() return scope:GetDescendants() end)
 	if not okAll then return nil end
-	-- Pass 1: spatial containment in a drawer-named Model.
-	local best, bestDist = nil, math.huge
-	for i = 1, #all do
-		local m = all[i]
-		if m:IsA("Model") and not isOurEsp(m) and matchesAny(lowerName(m), DRAWER_NAMES) then
-			local ok, cf, sz = pcall(function() return m:GetBoundingBox() end)
-			if ok and cf then
-				local off = kpos - cf.Position
-				local half = sz / 2 + Vector3.new(1, 1, 1)
-				if math.abs(off.X) <= half.X and math.abs(off.Y) <= half.Y and math.abs(off.Z) <= half.Z then
-					if off.Magnitude < bestDist then best, bestDist = m, off.Magnitude end
-				end
-			end
-		end
-	end
-	if best then return best end
-	-- Pass 2: nearest drawer prompt near the key (any host type).
+	-- Pass 1: nearest drawer prompt near the key (any host type: drawers
+	-- here are loose parts with attachment-hosted DrawerPrompts).
 	local bestContainer, bestContainerDist = nil, 8
 	for i = 1, #all do
 		local d = all[i]
@@ -2427,10 +2467,11 @@ local function grabHiddenKey(hk, homeOverride)
 
 		-- Reference-style direct grab FIRST: prompt may already be alive.
 		if not promptUsable(prompt) then
-			-- Prompt dead -> the key sits in a CLOSED drawer. Locate the
-			-- furniture and open ONLY the drawer closest to the key.
-			-- Face it first: the game gates prompts on camera view.
-			if not drawer then drawer = drawerOfKey(part) end
+			-- Prompt dead -> the key sits in a CLOSED drawer. Use the
+			-- round cache (built once), else locate it now.
+			if not drawer then
+				drawer = (DrawerCache and DrawerCache[hk]) or drawerOfKey(part)
+			end
 			if drawer and CurrentGrabPos then
 				faceTowards(CurrentGrabPos)
 				openNearestDrawer(drawer, CurrentGrabPos)
@@ -2561,6 +2602,7 @@ local function autoWinLoop()
 	end
 	local function finishAutoWin()
 		State.autowin = false
+		DrawerCache = nil
 		if not prevInsta then
 			State.instacollect = false
 			if UiRefs.instaTgl then pcall(function() UiRefs.instaTgl:Set(false) end) end
@@ -2572,6 +2614,8 @@ local function autoWinLoop()
 		if not State.autowin then break end
 		local hrp0 = myHRP()
 		local home = (hrp0 and hrp0.CFrame) or nil
+		-- One scan maps every key to its drawer for the whole run.
+		buildDrawerCache()
 
 		-- 1/4: teleport to each key, grab it, come back home.
 		setStatus("AUTO WIN 1/4: collecting keys (" .. countKeysHeld() .. "/" .. KEYS_NEEDED .. ")")
@@ -2609,36 +2653,30 @@ local function autoWinLoop()
 		if not State.autowin then break end
 
 		-- 2/4: put the keys in the doors (key equipped, back home after).
+		-- Lock prompts resolved ONCE here (they never move) instead of
+		-- re-scanning per door.
 		setStatus("AUTO WIN 2/4: opening doors (" .. countKeysHeld() .. "/" .. KEYS_NEEDED .. " keys)")
 		notify("Auto Win", "Step 2/4: unlocking doors", "lock-open")
-		equipKeyTool()
+		local lockList = {}
 		for _, lname in ipairs(LOCK_PARTS) do
-			if not State.autowin then break end
-			waitRespawn()
-			if not State.autowin then break end
-			equipKeyTool()
 			local lp = lockPromptByName(lname)
-			if lp then
-				prepPrompt(lp)
-				pcall(function() lp.HoldDuration = 0 end)
-				local part = promptRootPart(lp)
-				if part then instantTP(part.Position + Vector3.new(0, 1, 1)) end
-				if not State.autowin then break end
-				firePrompt(lp, true)
-				pressE(0.15)
-				task.wait(0.15)
-			end
+			if lp then lockList[#lockList+1] = lp end
 		end
 		for _, t in ipairs(scanLockPrompts(20)) do
+			lockList[#lockList+1] = t.prompt
+		end
+		equipKeyTool()
+		for _, lp in ipairs(lockList) do
 			if not State.autowin then break end
 			waitRespawn()
 			if not State.autowin then break end
 			equipKeyTool()
-			prepPrompt(t.prompt)
-			pcall(function() t.prompt.HoldDuration = 0 end)
-			instantTP(t.pos + Vector3.new(0, 1, 1))
+			prepPrompt(lp)
+			pcall(function() lp.HoldDuration = 0 end)
+			local part = promptRootPart(lp)
+			if part then instantTP(part.Position + Vector3.new(0, 1, 1)) end
 			if not State.autowin then break end
-			firePrompt(t.prompt, true)
+			firePrompt(lp, true)
 			pressE(0.15)
 			task.wait(0.15)
 		end
@@ -2802,7 +2840,7 @@ end
 -- does not sit on the tracked part itself).
 local function fireKeyPromptsNear(pos, radius)
 	local fired = false
-	for _, inst in ipairs(workspace:GetDescendants()) do
+	for _, inst in ipairs(mapRoot():GetDescendants()) do
 		if inst:IsA("ProximityPrompt") and not isOurEsp(inst) then
 			local part = promptRootPart(inst)
 			if part and (part.Position - pos).Magnitude <= radius then
@@ -3293,7 +3331,7 @@ local function buildGui()
 				table.insert(lines, "POS: " .. math.floor(origin.X) .. ", " .. math.floor(origin.Y) .. ", " .. math.floor(origin.Z))
 				table.insert(lines, "-- objects within 60 studs --")
 				local seen = {}
-				for _, inst in ipairs(workspace:GetDescendants()) do
+				for _, inst in ipairs(mapRoot():GetDescendants()) do
 					if isOurEsp(inst) then
 						-- skip
 					elseif (inst:IsA("Model") or inst:IsA("BasePart")) and not seen[inst] then
@@ -3354,7 +3392,7 @@ local function buildGui()
 				-- Anything that smells like a keypad/panel/digit/elevator:
 				-- dump 2 levels of its tree.
 				local hot = {}
-				for _, inst in ipairs(workspace:GetDescendants()) do
+				for _, inst in ipairs(mapRoot():GetDescendants()) do
 					if not isOurEsp(inst) then
 						local n = lowerName(inst)
 						if string.find(n, "keypad", 1, true) or string.find(n, "key pad", 1, true)
@@ -3704,6 +3742,7 @@ end)
 
 local accDist, accCode, accText, accFb = 0, 0, 0, 0
 local accAntiKill = 0
+local accNoclip = 0
 local noteFlag, noteFlagAt = "?", 0
 trackConnection(RunService.Heartbeat:Connect(function(dt)
 	if not State.running then return end
@@ -3756,11 +3795,17 @@ trackConnection(RunService.Heartbeat:Connect(function(dt)
 		end
 	end
 	if State.noclip then
-		local char = myCharacter()
-		if char then
-			for _, p in ipairs(char:GetDescendants()) do
-				if p:IsA("BasePart") and p.CanCollide then
-					pcall(function() p.CanCollide = false end)
+		-- Throttled: the game rarely re-enables collision, no need to
+		-- walk the whole character every frame.
+		accNoclip = accNoclip + dt
+		if accNoclip >= 0.25 then
+			accNoclip = 0
+			local char = myCharacter()
+			if char then
+				for _, p in ipairs(char:GetDescendants()) do
+					if p:IsA("BasePart") and p.CanCollide then
+						pcall(function() p.CanCollide = false end)
+					end
 				end
 			end
 		end
