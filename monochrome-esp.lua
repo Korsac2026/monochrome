@@ -1687,6 +1687,56 @@ local function elevatorPrompt()
 	return nil
 end
 
+-- Keypad detection by READOUTS: the code panel is the only place with a
+-- group of 3-4 single-digit TextLabels (the boxes showing each digit).
+-- Groups them by their SurfaceGui-adorned part / common ancestor.
+local function findKeypadByReadouts()
+	local groups = {} -- [ancestor] = count
+	local function ancestorOf(lbl)
+		local node = lbl
+		for _ = 1, 6 do
+			if typeof(node) ~= "Instance" then return nil end
+			if node:IsA("SurfaceGui") or node:IsA("BillboardGui") then
+				local ad = node.Adornee
+				if ad then
+					local anc = ad
+					for _ = 1, 3 do
+						if anc and anc:IsA("Model") then return anc end
+						anc = anc and anc.Parent
+					end
+					return ad
+				end
+				node = node.Parent
+			elseif node:IsA("BasePart") then
+				local anc = node
+				for _ = 1, 3 do
+					if anc and anc:IsA("Model") then return anc end
+					anc = anc and anc.Parent
+				end
+				return node
+			end
+			node = node.Parent
+		end
+		return nil
+	end
+	for _, inst in ipairs(workspace:GetDescendants()) do
+		if not isOurEsp(inst) and (inst:IsA("TextLabel") or inst:IsA("TextButton")) then
+			local ok, t = pcall(function() return inst.Text end)
+			if ok and type(t) == "string" and #t == 1 and string.match(t, "%d") then
+				local anc = ancestorOf(inst)
+				if anc then
+					groups[anc] = (groups[anc] or 0) + 1
+				end
+			end
+		end
+	end
+	local best, bestCount = nil, 2 -- need at least 3 digits grouped
+	for anc, n in pairs(groups) do
+		if n > bestCount then best, bestCount = anc, n end
+	end
+	return best
+end
+
 local function keypadModel()
 	local map = mapRoot()
 	local k = map:FindFirstChild("Keypad")
@@ -1708,6 +1758,9 @@ local function keypadModel()
 			if hits >= 3 then return inst end
 		end
 	end
+	-- ...or the readout heuristic: group of 3-4 single-digit labels.
+	local byReadouts = findKeypadByReadouts()
+	if byReadouts then return byReadouts end
 	return nil
 end
 
@@ -1981,6 +2034,18 @@ local function screenClickPart(part)
 	return vimClick(v.X, v.Y)
 end
 
+-- Forward declarations, used by the panel-buttons module below and
+-- enterCodeReference (which runs after everything is assigned).
+local clickKeypadDigit = nil
+
+-- Locate digit{w} model inside whatever the keypad turned out to be:
+-- direct "Digit{w}" child first, then any descendant named digit{w}.
+local function keypadDigitModel(pad, w)
+	local direct = pad:FindFirstChild("Digit" .. w) or pad:FindFirstChild("digit" .. w)
+	if direct then return direct end
+	return pad:FindFirstChild("Digit" .. w, true) or pad:FindFirstChild("digit" .. w, true)
+end
+
 -- ===================== PANEL BUTTONS =====================
 -- Overlay buttons projected onto the world (the trick the working scripts
 -- use): a ScreenGui button is glued to each Keypad digit's screen position
@@ -2031,13 +2096,14 @@ local function destroyPanelButtons()
 	PanelButtons.active = false
 end
 
--- Digit{w} part of the real Keypad (the clickable box).
+-- Digit{w} part of the real Keypad (the clickable box), via any detector.
 local function keypadDigitPart(w)
 	local map = mapRoot()
 	local pad = (map ~= workspace and map:FindFirstChild("Keypad"))
 		or workspace:FindFirstChild("Keypad")
+		or keypadModel()
 	if not pad then return nil end
-	local digitModel = pad:FindFirstChild("Digit" .. w)
+	local digitModel = keypadDigitModel(pad, w)
 	if not digitModel then return nil end
 	return digitModel:FindFirstChildWhichIsA("BasePart", true)
 end
@@ -2157,22 +2223,18 @@ local function keypadSlotDigit(digitW)
 	return shown and string.match(tostring(shown), "%d") or nil
 end
 
--- Real click on a keypad digit. Defined by the panel-buttons module below;
--- forward-declared here because enterCodeReference runs after load.
-local clickKeypadDigit = nil
-
--- Reference-style code entry: monochrome > Keypad > Digit1-4, each with a
--- DIRECT "ClickDetector" + "Readout" (TextLabel). Clicks each digit until
--- its Readout shows the wanted char (max 20 tries). Clicks go through the
--- REAL input pipeline (VIM mouse click at the digit's screen position,
--- like the working scripts do), fireclickdetector as fallback.
+-- Reference-style code entry: find the keypad (direct > fuzzy > readout
+-- heuristic), then click each digit until its Readout shows the wanted
+-- char. Clicks go through the REAL input pipeline (VIM mouse click at the
+-- digit's screen position), fireclickdetector as fallback.
 local function enterCodeReference(code, force)
 	local map = mapRoot()
 	local pad = (map ~= workspace and map:FindFirstChild("Keypad"))
 		or workspace:FindFirstChild("Keypad")
+		or keypadModel()
 	if not pad then
 		notify("Put Code", "Keypad Not Found (monochrome folder: "
-			.. (map ~= workspace and "yes" or "NO") .. ")", "alert")
+			.. (map ~= workspace and "yes" or "NO") .. ", readout scan failed too)", "alert")
 		return false
 	end
 	if not VIM and typeof(fireclickdetector) ~= "function" then
@@ -2182,15 +2244,21 @@ local function enterCodeReference(code, force)
 	for w = 1, math.min(4, #code) do
 		if not State.autowin and not force then return false end
 		local want = string.sub(code, w, w)
-		local digitModel = pad:FindFirstChild("Digit" .. w)
+		local digitModel = keypadDigitModel(pad, w)
 		if not digitModel then
-			notify("Put Code", "Digit" .. w .. " Not Found under Keypad", "alert")
+			notify("Put Code", "Digit" .. w .. " Not Found in " .. pad.Name, "alert")
 			return false
 		end
 		local readout = digitModel:FindFirstChild("Readout")
+			or digitModel:FindFirstChild("Readout", true)
 		if not readout then
-			notify("Put Code", "Readout missing on Digit" .. w, "alert")
+			notify("Put Code", "Readout missing on Digit" .. w .. " (" .. pad.Name .. ")", "alert")
 			return false
+		end
+		if not (readout:IsA("TextLabel") or readout:IsA("TextButton")) then
+			local lbl = readout:FindFirstChildWhichIsA("TextLabel", true)
+				or readout:FindFirstChildWhichIsA("TextButton", true)
+			if lbl then readout = lbl end
 		end
 		local tries = 0
 		local txt = ""
@@ -3271,6 +3339,66 @@ local function buildGui()
 			fullScan()
 			scanCodeTexts()
 			notify("URANIUM", "World rescanned", "refresh")
+		end,
+	})
+	miscSec:Button({
+		Name = "Copy map structure (debug)",
+		Callback = function()
+			task.spawn(function()
+				local lines = {}
+				local map = workspace:FindFirstChild("monochrome")
+				table.insert(lines, "MAP folder: " .. (map and map:GetFullName() or "NOT FOUND"))
+				table.insert(lines, "-- workspace children --")
+				for _, ch in ipairs(workspace:GetChildren()) do
+					table.insert(lines, ch.ClassName .. " | " .. ch.Name)
+				end
+				if map then
+					table.insert(lines, "-- monochrome children --")
+					for _, ch in ipairs(map:GetChildren()) do
+						table.insert(lines, ch.ClassName .. " | " .. ch.Name)
+					end
+				end
+				-- Anything that smells like a keypad/panel/digit/elevator:
+				-- dump 2 levels of its tree.
+				local hot = {}
+				for _, inst in ipairs(workspace:GetDescendants()) do
+					if not isOurEsp(inst) then
+						local n = lowerName(inst)
+						if string.find(n, "keypad", 1, true) or string.find(n, "key pad", 1, true)
+							or string.find(n, "digit", 1, true) or string.find(n, "readout", 1, true)
+							or string.find(n, "elevator", 1, true) or string.find(n, "panel", 1, true) then
+							local root = inst
+							for _ = 1, 4 do
+								if root.Parent and root.Parent ~= workspace and root.Parent ~= map then
+									root = root.Parent
+								else
+									break
+								end
+							end
+							if not hot[root] then
+								hot[root] = true
+								table.insert(lines, "-- TREE of " .. root:GetFullName() .. " --")
+								for _, d in ipairs(root:GetDescendants()) do
+									local l = "  " .. d.ClassName .. " | " .. d.Name
+									if d:IsA("TextLabel") or d:IsA("TextButton") then
+										l = l .. " | text='" .. tostring(d.Text) .. "'"
+									end
+									table.insert(lines, l)
+									if #lines > 300 then break end
+								end
+							end
+						end
+					end
+					if #lines > 300 then break end
+				end
+				local out = table.concat(lines, "\n")
+				pcall(function()
+					if typeof(setclipboard) == "function" then
+						setclipboard(out)
+					end
+				end)
+				notify("Debug", "Map structure copied (" .. #lines .. " lines) — paste it in chat/Discord", "copy")
+			end)
 		end,
 	})
 	miscSec:Button({
