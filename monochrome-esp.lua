@@ -2105,6 +2105,8 @@ local function keypadDigitPart(w)
 	if not pad then return nil end
 	local digitModel = keypadDigitModel(pad, w)
 	if not digitModel then return nil end
+	-- Digit slots ARE Parts themselves (no BasePart children) — check self first.
+	if digitModel:IsA("BasePart") then return digitModel end
 	return digitModel:FindFirstChildWhichIsA("BasePart", true)
 end
 
