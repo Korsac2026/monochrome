@@ -2046,57 +2046,10 @@ local function keypadDigitModel(pad, w)
 	return pad:FindFirstChild("Digit" .. w, true) or pad:FindFirstChild("digit" .. w, true)
 end
 
--- ===================== PANEL BUTTONS =====================
--- Overlay buttons projected onto the world (the trick the working scripts
--- use): a ScreenGui button is glued to each Keypad digit's screen position
--- every frame. Clicking it sends a REAL VIM mouse click at that exact
--- screen point, so the game's own input pipeline handles the press —
--- exactly like clicking the digit yourself.
-local PanelButtons = { gui = nil, frame = nil, buttons = {}, conn = nil, active = false }
-
-local function panelButtonsParent()
-	local ok, parent = pcall(function()
-		if gethui then return gethui() end
-		return game:GetService("CoreGui")
-	end)
-	if ok and parent then return parent end
-	return (LocalPlayer and LocalPlayer:FindFirstChildOfClass("PlayerGui")) or nil
-end
-
-local function ensurePanelButtons()
-	if PanelButtons.gui and PanelButtons.gui.Parent then return end
-	local parent = panelButtonsParent()
-	if not parent then return end
-	local gui = Instance.new("ScreenGui")
-	gui.Name = "UraniumPanelButtons"
-	gui.ResetOnSpawn = false
-	gui.DisplayOrder = 500
-	gui.IgnoreGuiInset = true
-	gui.Parent = parent
-	PanelButtons.gui = gui
-	local frame = Instance.new("Frame")
-	frame.Name = "Holder"
-	frame.BackgroundTransparency = 1
-	frame.Size = UDim2.new(1, 0, 1, 0)
-	frame.Parent = gui
-	PanelButtons.frame = frame
-end
-
-local function destroyPanelButtons()
-	if PanelButtons.conn then
-		pcall(function() PanelButtons.conn:Disconnect() end)
-		PanelButtons.conn = nil
-	end
-	if PanelButtons.gui then
-		pcall(function() PanelButtons.gui:Destroy() end)
-	end
-	PanelButtons.gui = nil
-	PanelButtons.frame = nil
-	PanelButtons.buttons = {}
-	PanelButtons.active = false
-end
-
--- Digit{w} part of the real Keypad (the clickable box), via any detector.
+-- ===================== KEYPAD CLICKS =====================
+-- Real clicks straight at each digit box (no overlay: an overlay button
+-- would swallow the very click meant for the digit behind it).
+-- Digit{w} part of the real Keypad (the clickable box).
 local function keypadDigitPart(w)
 	local map = mapRoot()
 	local pad = (map ~= workspace and map:FindFirstChild("Keypad"))
@@ -2110,63 +2063,9 @@ local function keypadDigitPart(w)
 	return digitModel:FindFirstChildWhichIsA("BasePart", true)
 end
 
--- Show overlay buttons on every keypad digit. While visible they track
--- the digits on screen; a click = REAL VIM mouse click at that position.
-local function showPanelButtons()
-	ensurePanelButtons()
-	if not PanelButtons.gui then return end
-	for w = 1, 4 do
-		local btn = PanelButtons.buttons[w]
-		if not btn or not btn.Parent then
-			btn = Instance.new("TextButton")
-			btn.Name = "DigitBtn" .. w
-			btn.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
-			btn.BackgroundTransparency = 0.75
-			btn.TextColor3 = Color3.fromRGB(255, 255, 255)
-			btn.Font = Enum.Font.GothamBold
-			btn.TextSize = 13
-			btn.Text = "+1"
-			btn.Size = UDim2.new(0, 46, 0, 24)
-			btn.Visible = false
-			btn.Parent = PanelButtons.frame
-			PanelButtons.buttons[w] = btn
-			-- Clicking the overlay = real VIM click at this button's center,
-			-- which sits exactly on the digit box. The game's own pipeline
-			-- processes it like a genuine player click.
-			btn.MouseButton1Click:Connect(function()
-				local pos = btn.AbsolutePosition
-				local size = btn.AbsoluteSize
-				if pos and size then
-					vimClick(pos.X + size.X / 2, pos.Y + size.Y / 2)
-				end
-			end)
-		end
-	end
-	if PanelButtons.conn then
-		pcall(function() PanelButtons.conn:Disconnect() end)
-	end
-	PanelButtons.active = true
-	PanelButtons.conn = RunService.RenderStepped:Connect(function()
-		if not PanelButtons.active then return end
-		for w = 1, 4 do
-			local btn = PanelButtons.buttons[w]
-			local part = keypadDigitPart(w)
-			if btn and part and inWorkspace(part) then
-				local sp, onScreen = Camera:WorldToViewportPoint(part.Position)
-				if onScreen then
-					btn.Position = UDim2.new(0, sp.X - 23, 0, sp.Y - 12)
-					btn.Visible = true
-				else
-					btn.Visible = false
-				end
-			elseif btn then
-				btn.Visible = false
-			end
-		end
-	end)
-end
-
--- One REAL click on digit{w} (via the overlay position = digit screen pos).
+-- One REAL click on digit{w}: VIM mouse click at the digit box's exact
+-- screen position (the game's own pipeline registers it), fireclickdetector
+-- fallback.
 function clickKeypadDigitImpl(w)
 	local part = keypadDigitPart(w)
 	if not part then return false end
@@ -2611,6 +2510,22 @@ local function grabKey(inst)
 end
 
 local function autoWinLoop()
+	-- Auto-collect ON during the run: every correct key we walk near gets
+	-- grabbed automatically (proximity loop). Restored at the end.
+	local prevInsta = State.instacollect
+	if not prevInsta then
+		State.instacollect = true
+		task.spawn(instaCollectLoop)
+		if UiRefs.instaTgl then pcall(function() UiRefs.instaTgl:Set(true) end) end
+	end
+	local function finishAutoWin()
+		State.autowin = false
+		if not prevInsta then
+			State.instacollect = false
+			if UiRefs.instaTgl then pcall(function() UiRefs.instaTgl:Set(false) end) end
+		end
+		if UiRefs.autoTgl then pcall(function() UiRefs.autoTgl:Set(false) end) end
+	end
 	while State.autowin and State.running do
 		waitRespawn()
 		if not State.autowin then break end
@@ -2728,8 +2643,7 @@ local function autoWinLoop()
 		if not (code and #code == 4) then
 			setStatus("AUTO WIN: code not found — use View Code, then Put Code Now")
 			notify("Auto Win stuck", "Code not found — use View Code, then Put Code Now", "info")
-			State.autowin = false
-			if UiRefs.autoTgl then pcall(function() UiRefs.autoTgl:Set(false) end) end
+			finishAutoWin()
 			break
 		end
 
@@ -2752,8 +2666,7 @@ local function autoWinLoop()
 		if not panel then
 			setStatus("AUTO WIN: keypad not found. Code: " .. code)
 			notify("Auto Win stuck", "Keypad not found. Code: " .. code, "info")
-			State.autowin = false
-			if UiRefs.autoTgl then pcall(function() UiRefs.autoTgl:Set(false) end) end
+			finishAutoWin()
 			break
 		end
 		waitRespawn()
@@ -2781,9 +2694,12 @@ local function autoWinLoop()
 		end
 		setStatus("AUTO WIN done. Code: " .. code)
 		notify("Auto Win finished", "Code: " .. code .. " — game completed", "check")
-		State.autowin = false
-		if UiRefs.autoTgl then pcall(function() UiRefs.autoTgl:Set(false) end) end
+		finishAutoWin()
 		break
+	end
+	if not prevInsta then
+		State.instacollect = false
+		if UiRefs.instaTgl then pcall(function() UiRefs.instaTgl:Set(false) end) end
 	end
 end
 
@@ -3002,42 +2918,6 @@ local function putCodeNow()
 		firePromptsIn(panel)
 		setStatus("PUT CODE done: " .. code)
 		notify("Put Code done", "Code: " .. code, "check")
-	end)
-end
-
--- Enter the code MANUALLY using the on-screen keypad buttons: walks each
--- digit with real VIM clicks, exactly like clicking them yourself.
-local function putCodeWithButtons()
-	task.spawn(function()
-		setStatus("PUT CODE: finding code...")
-		local code = acquireCode() or getFoundCode() or readCodeNoteDirect()
-		if not code or #code ~= 4 then
-			notify("Put Code", "Code not found", "info")
-			return
-		end
-		local map = mapRoot()
-		local pad = (map ~= workspace and map:FindFirstChild("Keypad"))
-			or workspace:FindFirstChild("Keypad")
-		if not pad then
-			notify("Put Code", "Keypad Not Found", "alert")
-			return
-		end
-		if not VIM then
-			notify("Put Code", "No VirtualInputManager — can't click", "alert")
-			return
-		end
-		-- Stand in front of the keypad so the digits are on screen.
-		local _, pp = resolveTarget(pad)
-		local hrp = myHRP()
-		if pp and hrp then
-			pcall(function() hrp.CFrame = CFrame.new(pp + Vector3.new(0, 1, 3)) end)
-			task.wait(0.2)
-			faceTowards(pp)
-		end
-		notify("Put Code", "Clicking digits with REAL mouse input: " .. code, "hash")
-		if enterCodeReference(code, true) then
-			setStatus("PUT CODE done (real clicks): " .. code)
-		end
 	end)
 end
 
@@ -3306,17 +3186,6 @@ local function buildGui()
 		Name = "Put Code Now",
 		Callback = function() putCodeNow() end,
 	})
-	autoSec:Button({
-		Name = "Put Code (REAL clicks)",
-		Callback = function() putCodeWithButtons() end,
-	})
-	autoSec:Toggle({
-		Name = "Keypad Buttons (click digits)",
-		Default = false, Flag = "ura_panelbuttons",
-		Callback = function(v)
-			if v then showPanelButtons() else destroyPanelButtons() end
-		end,
-	})
 	UiRefs.autoPutCodeTgl = autoSec:Toggle({
 		Name = "Auto Put Code (when found)", Default = State.autoPutCode, Flag = "ura_autoputcode",
 		Callback = function(v)
@@ -3337,7 +3206,7 @@ local function buildGui()
 		Name = "View Code",
 		Callback = function() viewCodeNow() end,
 	})
-	grabSec:Toggle({
+	UiRefs.instaTgl = grabSec:Toggle({
 		Name = "Insta Collect (walk near keys)", Default = State.instacollect, Flag = "ura_instacollect",
 		Callback = function(v)
 			State.instacollect = v
@@ -3962,7 +3831,6 @@ function Api.Unload()
 	State.fullbright = false
 	State.instantPrompt = false
 	State.godmode = false
-	destroyPanelButtons()
 	for _, c in ipairs(GodConns) do
 		pcall(function() c:Disconnect() end)
 	end
