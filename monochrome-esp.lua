@@ -2392,20 +2392,38 @@ local function promptUsable(prompt)
 	return ok and en == true
 end
 
--- Open the drawer holding a key: fire its prompt and click detectors.
-local function openDrawer(drawer)
-	if typeof(drawer) ~= "Instance" then return end
-	local ok, descs = pcall(function() return drawer:GetDescendants() end)
+-- Open the ONE drawer closest to the key. Furniture models hold several
+-- drawers, each with its own prompt: firing them all toggles them ALL
+-- (the bottom-drawer bug — the key drawer ended up closed while other
+-- drawers opened). Pick the closest prompt/detector to the key instead.
+local function openNearestDrawer(furniture, keyPos)
+	if typeof(furniture) ~= "Instance" or typeof(keyPos) ~= "Vector3" then return end
+	local bestPrompt, bestDet, bestDist = nil, nil, math.huge
+	local ok, descs = pcall(function() return furniture:GetDescendants() end)
 	if not ok then return end
 	for i = 1, #descs do
 		local d = descs[i]
-		if d:IsA("ProximityPrompt") and d.Enabled then
-			prepPrompt(d)
-			pcall(function() d.HoldDuration = 0 end)
-			firePrompt(d, true)
-		elseif d:IsA("ClickDetector") and typeof(fireclickdetector) == "function" then
-			pcall(fireclickdetector, d)
+		if d:IsA("ProximityPrompt") then
+			local part = promptRootPart(d)
+			if part then
+				local dist = (part.Position - keyPos).Magnitude
+				if dist < bestDist then bestPrompt, bestDist = d, dist end
+			end
+		elseif d:IsA("ClickDetector") then
+			local host = d.Parent
+			local part = host and (host:IsA("BasePart") and host or host:FindFirstChildWhichIsA("BasePart")) or nil
+			if part then
+				local dist = (part.Position - keyPos).Magnitude
+				if dist < bestDist then bestDet, bestDist = d, dist end
+			end
 		end
+	end
+	if bestPrompt then
+		prepPrompt(bestPrompt)
+		pcall(function() bestPrompt.HoldDuration = 0 end)
+		firePrompt(bestPrompt, true)
+	elseif bestDet and typeof(fireclickdetector) == "function" then
+		pcall(fireclickdetector, bestDet)
 	end
 end
 
@@ -2481,15 +2499,23 @@ local function grabHiddenKey(hk, homeOverride)
 
 		-- Reference-style direct grab FIRST: prompt may already be alive.
 		if not promptUsable(prompt) then
-			-- Prompt dead -> the key sits in a CLOSED drawer. Locate and
-			-- open the SPECIFIC drawer holding it, then wait for the
-			-- prompt to wake up.
+			-- Prompt dead -> the key sits in a CLOSED drawer. Locate the
+			-- furniture and open ONLY the drawer closest to the key.
 			if not drawer then drawer = drawerOfKey(part) end
-			if drawer then
-				openDrawer(drawer)
-				for _ = 1, 8 do
+			if drawer and CurrentGrabPos then
+				openNearestDrawer(drawer, CurrentGrabPos)
+				for _ = 1, 6 do
 					if promptUsable(prompt) then break end
-					task.wait(0.15)
+					task.wait(0.2)
+				end
+				if not promptUsable(prompt) then
+					-- Drawer may have been OPEN and just got closed by our
+					-- fire: toggle the same one again.
+					openNearestDrawer(drawer, CurrentGrabPos)
+					for _ = 1, 6 do
+						if promptUsable(prompt) then break end
+						task.wait(0.2)
+					end
 				end
 			end
 			prompt = keyPromptIn(hk) or prompt
@@ -2564,10 +2590,10 @@ local function grabKey(inst)
 			instantTP(pos + Vector3.new(0, 1, 0))
 		end
 		if not State.autowin then return false end
-		-- Open the drawer first if there is one; the key prompt is dead
-		-- while closed and a blind E just toggles the drawer.
+		-- Open the closest drawer to the key if there is furniture around;
+		-- the key prompt is dead while closed and a blind E just toggles it.
 		if drawer then
-			openDrawer(drawer)
+			if pos then openNearestDrawer(drawer, pos) end
 			task.wait(0.35)
 			if not State.autowin then return false end
 		end
@@ -3339,6 +3365,61 @@ local function buildGui()
 			fullScan()
 			scanCodeTexts()
 			notify("URANIUM", "World rescanned", "refresh")
+		end,
+	})
+	miscSec:Button({
+		Name = "Scan around me (debug)",
+		Callback = function()
+			task.spawn(function()
+				local hrp = myHRP()
+				if not hrp then
+					notify("Debug", "No character", "alert")
+					return
+				end
+				local origin = hrp.Position
+				local lines = {}
+				table.insert(lines, "POS: " .. math.floor(origin.X) .. ", " .. math.floor(origin.Y) .. ", " .. math.floor(origin.Z))
+				table.insert(lines, "-- objects within 60 studs --")
+				local seen = {}
+				for _, inst in ipairs(workspace:GetDescendants()) do
+					if isOurEsp(inst) then
+						-- skip
+					elseif (inst:IsA("Model") or inst:IsA("BasePart")) and not seen[inst] then
+						local p = inst:IsA("BasePart") and inst or inst:FindFirstChildWhichIsA("BasePart", true)
+						if p then
+							local d = (p.Position - origin).Magnitude
+							if d <= 60 then
+								seen[inst] = true
+								table.insert(lines, string.format("[%dm] %s | %s",
+									math.floor(d), inst.ClassName, inst:GetFullName()))
+								for _, ch in ipairs(inst:GetDescendants()) do
+									if ch:IsA("ProximityPrompt") then
+										table.insert(lines, "  PROMPT " .. ch.Name
+											.. " | obj='" .. tostring(ch.ObjectText)
+											.. "' act='" .. tostring(ch.ActionText)
+											.. "' en=" .. tostring(ch.Enabled))
+									elseif ch:IsA("TextLabel") or ch:IsA("TextButton") then
+										table.insert(lines, "  LABEL " .. ch.Name .. " | text='" .. tostring(ch.Text) .. "'")
+									elseif ch:IsA("ClickDetector") then
+										table.insert(lines, "  CLICKDET " .. ch.Name)
+									elseif ch:IsA("StringValue") or ch:IsA("IntValue") or ch:IsA("NumberValue") then
+										table.insert(lines, "  VALUE " .. ch.Name .. " = " .. tostring(ch.Value))
+									end
+									if #lines > 400 then break end
+								end
+							end
+						end
+					end
+					if #lines > 400 then break end
+				end
+				local out = table.concat(lines, "\n")
+				pcall(function()
+					if typeof(setclipboard) == "function" then
+						setclipboard(out)
+					end
+				end)
+				notify("Debug", "Scanned 60 studs around you (" .. #lines .. " lines) — copied, paste it to the dev", "copy")
+			end)
 		end,
 	})
 	miscSec:Button({
