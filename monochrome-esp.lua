@@ -2034,10 +2034,6 @@ local function screenClickPart(part)
 	return vimClick(v.X, v.Y)
 end
 
--- Forward declarations, used by the panel-buttons module below and
--- enterCodeReference (which runs after everything is assigned).
-local clickKeypadDigit = nil
-
 -- Locate digit{w} model inside whatever the keypad turned out to be:
 -- direct "Digit{w}" child first, then any descendant named digit{w}.
 local function keypadDigitModel(pad, w)
@@ -2047,9 +2043,8 @@ local function keypadDigitModel(pad, w)
 end
 
 -- ===================== KEYPAD CLICKS =====================
--- Real clicks straight at each digit box (no overlay: an overlay button
--- would swallow the very click meant for the digit behind it).
--- Digit{w} part of the real Keypad (the clickable box).
+-- Digit{w} part of the real Keypad (the clickable box). Digit slots ARE
+-- Parts themselves (no BasePart children) — check self first.
 local function keypadDigitPart(w)
 	local map = mapRoot()
 	local pad = (map ~= workspace and map:FindFirstChild("Keypad"))
@@ -2058,42 +2053,9 @@ local function keypadDigitPart(w)
 	if not pad then return nil end
 	local digitModel = keypadDigitModel(pad, w)
 	if not digitModel then return nil end
-	-- Digit slots ARE Parts themselves (no BasePart children) — check self first.
 	if digitModel:IsA("BasePart") then return digitModel end
 	return digitModel:FindFirstChildWhichIsA("BasePart", true)
 end
-
--- One REAL click on digit{w}: VIM mouse click at the digit box's exact
--- screen position (the game's own pipeline registers it), fireclickdetector
--- fallback.
-function clickKeypadDigitImpl(w)
-	local part = keypadDigitPart(w)
-	if not part then return false end
-	if VIM then
-		-- Face the digit then click its exact screen position: the game's
-		-- own pipeline registers it (ClickDetector or whatever it uses).
-		faceTowards(part.Position)
-		local sp, onScreen = Camera:WorldToViewportPoint(part.Position)
-		if not onScreen then return false end
-		return vimClick(sp.X, sp.Y)
-	end
-	-- No VIM: fall back to fireclickdetector on the direct child.
-	local map = mapRoot()
-	local pad = (map ~= workspace and map:FindFirstChild("Keypad"))
-		or workspace:FindFirstChild("Keypad")
-	if pad then
-		local digitModel = pad:FindFirstChild("Digit" .. w)
-		if digitModel then
-			local det = digitModel:FindFirstChild("ClickDetector")
-			if det and typeof(fireclickdetector) == "function" then
-				pcall(fireclickdetector, det)
-				return true
-			end
-		end
-	end
-	return false
-end
-clickKeypadDigit = clickKeypadDigitImpl
 
 -- Read the digit currently shown on one Keypad slot. Reads the Readout
 -- label first; if there is none, any single-digit TextLabel in the slot
@@ -2163,21 +2125,41 @@ local function enterCodeReference(code, force)
 		end
 		local tries = 0
 		local txt = ""
+		-- Resolve click targets once per digit: direct detector + part.
+		local det = digitModel:FindFirstChild("ClickDetector")
+		local part = (digitModel:IsA("BasePart") and digitModel)
+			or digitModel:FindFirstChildWhichIsA("BasePart", true)
+		local hasFire = det and typeof(fireclickdetector) == "function"
+		local hasVIM = VIM and part and Camera
+		if not hasFire and not hasVIM then
+			notify("Put Code", "Digit" .. w .. ": no click method at all", "alert")
+			return false
+		end
 		while true do
 			if not State.autowin and not force then return false end
 			pcall(function() txt = tostring(readout.Text) end)
 			if txt == want then break end
-			if tries >= 20 then
+			if tries >= 12 then
 				notify("Put Code", "Digit" .. w .. " stuck: shows '" .. txt
-					.. "' want '" .. want .. "' (" .. tries .. " clicks)", "alert")
+					.. "' want '" .. want .. "' (" .. tries .. " rounds)", "alert")
 				return false
 			end
 			tries = tries + 1
-			if not clickKeypadDigit(w) then
-				notify("Put Code", "Click failed on Digit" .. w .. " (no method)", "alert")
-				return false
+			-- Attempt 1: fireclickdetector (ignores walls/distance).
+			if hasFire then
+				pcall(fireclickdetector, det)
+				task.wait(0.2)
+				pcall(function() txt = tostring(readout.Text) end)
+				if txt == want then break end
 			end
-			task.wait(0.12)
+			-- Attempt 2: real VIM click at the digit's screen position
+			-- (needs clear line of sight from the camera).
+			if hasVIM then
+				faceTowards(part.Position)
+				local sp, onScreen = Camera:WorldToViewportPoint(part.Position)
+				if onScreen then vimClick(sp.X, sp.Y) end
+				task.wait(0.2)
+			end
 		end
 	end
 	notify("Put Code", "Code entered OK (" .. code .. ")", "check")
