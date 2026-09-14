@@ -1923,9 +1923,20 @@ local function scanPlayers()
 	end
 end
 
+-- Stand position for any panel-like object, INCLUDING Folders (the
+-- Keypad is a Folder — resolveTarget can't adorn it, but we only need
+-- a spot to stand, so any descendant part works).
+local function panelAnchorPos(pad)
+	if typeof(pad) ~= "Instance" then return nil end
+	if pad:IsA("BasePart") then return pad.Position end
+	local part = pad:FindFirstChildWhichIsA("BasePart", true)
+	if part then return part.Position end
+	return nil
+end
+
 local function findEntryPanel()
 	for _, inst in ipairs(workspace:GetDescendants()) do
-		if inst:IsA("Model") or inst:IsA("BasePart") then
+		if inst:IsA("Model") or inst:IsA("BasePart") or inst:IsA("Folder") then
 			local n = lowerName(inst)
 			local hit = string.find(n, "keypad", 1, true) or string.find(n, "panel", 1, true)
 				or string.find(n, "elevator", 1, true)
@@ -1937,7 +1948,11 @@ local function findEntryPanel()
 				end)
 				if hasIO then
 					local _, part = resolveTarget(inst)
-					if part then return inst, part.Position end
+					if part then
+						return inst, part.Position
+					end
+					local ppos = panelAnchorPos(inst)
+					if ppos then return inst, ppos end
 				end
 			end
 		end
@@ -2414,8 +2429,10 @@ local function grabHiddenKey(hk, homeOverride)
 		if not promptUsable(prompt) then
 			-- Prompt dead -> the key sits in a CLOSED drawer. Locate the
 			-- furniture and open ONLY the drawer closest to the key.
+			-- Face it first: the game gates prompts on camera view.
 			if not drawer then drawer = drawerOfKey(part) end
 			if drawer and CurrentGrabPos then
+				faceTowards(CurrentGrabPos)
 				openNearestDrawer(drawer, CurrentGrabPos)
 				for _ = 1, 6 do
 					if promptUsable(prompt) then break end
@@ -2444,12 +2461,14 @@ local function grabHiddenKey(hk, homeOverride)
 		if diving then
 			diveUnder(CurrentGrabPos)
 			task.wait(0.15)
+			if CurrentGrabPos then faceTowards(CurrentGrabPos) end
 		else
 			hrp = myHRP()
 			if hrp and part and inWorkspace(part) then
 				-- Reference offset: 3 studs above the key part.
 				pcall(function() hrp.CFrame = part.CFrame + Vector3.new(0, 3, 0) end)
 				task.wait(0.3)
+				faceTowards(part.Position)
 			end
 		end
 		if not State.autowin then cleanup(false) return false end
@@ -2678,8 +2697,8 @@ local function autoWinLoop()
 		do
 			local pad = keypadModel()
 			if pad then
-				local _, p = resolveTarget(pad)
-				if p then panel, panelPos = pad, p.Position end
+				local p = panelAnchorPos(pad)
+				if p then panel, panelPos = pad, p end
 			end
 			if not panel then
 				panel, panelPos = findEntryPanel()
@@ -2903,8 +2922,8 @@ local function putCodeNow()
 		do
 			local pad = keypadModel()
 			if pad then
-				local _, p = resolveTarget(pad)
-				if p then panel, panelPos = pad, p.Position end
+				local p = panelAnchorPos(pad)
+				if p then panel, panelPos = pad, p end
 			end
 			if not panel then
 				panel, panelPos = findEntryPanel()
