@@ -2010,83 +2010,74 @@ local function keypadSlotDigit(digitW)
 	return shown and string.match(tostring(shown), "%d") or nil
 end
 
--- Click one digit on the Keypad. The keypad is a CYCLER: every click is
--- +1 (9 wraps to 0). So: read the current digit, compute the exact number
--- of clicks needed (want - current) % 10, click, verify. If the digit
--- label is unreadable, fall back to clicking and re-verifying.
-local function pressKeypadDigit(pad, w, want, force)
-	local digitW = pad:FindFirstChild("Digit" .. w, true)
-		or pad:FindFirstChild("digit" .. w, true)
-	if not digitW then return false end
-	local clicker = digitW:FindFirstChild("Digit", true) or digitW
-	local det = clicker:FindFirstChildOfClass("ClickDetector")
-		or digitW:FindFirstChildOfClass("ClickDetector", true)
-	local dw = digitW:IsA("BasePart") and digitW or digitW:FindFirstChildWhichIsA("BasePart", true)
-
-	local function clickOnce()
-		if det and typeof(fireclickdetector) == "function" then
-			pcall(fireclickdetector, det)
-		elseif dw and VIM then
-			screenClickPart(dw)
-		else
-			local clicks, buttons = panelDigitControls(pad)
-			local btn = buttons[want]
-			if btn then clickButtonAt(btn) end
-		end
+-- EXACT port of the reference script's keypad entry (proven working on
+-- this game): monochrome > Keypad > Digit1-4, each with a DIRECT child
+-- "ClickDetector" and a DIRECT child "Readout" (TextLabel). Clicks each
+-- detector until its Readout shows the wanted char (max 20 tries, 0.1s
+-- apart). Reports exactly what's missing via notify() when it fails.
+local function enterCodeReference(code, force)
+	local map = mapRoot()
+	local pad = (map ~= workspace and map:FindFirstChild("Keypad"))
+		or workspace:FindFirstChild("Keypad")
+	if not pad then
+		notify("Put Code", "Keypad Not Found (monochrome folder: "
+			.. (map ~= workspace and "yes" or "NO") .. ")", "alert")
+		return false
 	end
-
-	local wantN = tonumber(want) or 0
-	for round = 1, 12 do
+	if typeof(fireclickdetector) ~= "function" then
+		notify("Put Code", "fireclickdetector unavailable on this executor", "alert")
+		return false
+	end
+	for w = 1, math.min(4, #code) do
 		if not State.autowin and not force then return false end
-		local shown = keypadSlotDigit(digitW)
-		if shown == want then return true end
-		local cur = tonumber(shown)
-		if cur then
-			-- Deterministic: (want - current) mod 10 clicks, verified.
-			local needed = (wantN - cur) % 10
-			if needed == 0 then
-				-- Label stale or wrong: one nudge then re-read.
-				clickOnce()
-				task.wait(0.3)
-			else
-				for _ = 1, needed do
-					if not State.autowin and not force then return false end
-					clickOnce()
-					task.wait(0.25)
-				end
-			end
-		else
-			-- Unreadable label: click and hope the verify picks it up later.
-			clickOnce()
-			task.wait(0.3)
+		local want = string.sub(code, w, w)
+		local digitModel = pad:FindFirstChild("Digit" .. w)
+		if not digitModel then
+			notify("Put Code", "Digit" .. w .. " Not Found under Keypad", "alert")
+			return false
 		end
-		task.wait(0.2)
+		local det = digitModel:FindFirstChild("ClickDetector")
+		if not det then
+			notify("Put Code", "ClickDetector missing on Digit" .. w, "alert")
+			return false
+		end
+		local readout = digitModel:FindFirstChild("Readout")
+		if not readout then
+			notify("Put Code", "Readout missing on Digit" .. w, "alert")
+			return false
+		end
+		local tries = 0
+		local txt = ""
+		while true do
+			if not State.autowin and not force then return false end
+			pcall(function() txt = tostring(readout.Text) end)
+			if txt == want then break end
+			if tries >= 20 then
+				notify("Put Code", "Digit" .. w .. " stuck: shows '" .. txt
+					.. "' want '" .. want .. "' (" .. tries .. " clicks)", "alert")
+				return false
+			end
+			tries = tries + 1
+			pcall(fireclickdetector, det)
+			task.wait(0.1)
+		end
 	end
-	return keypadSlotDigit(digitW) == want
+	notify("Put Code", "Code entered OK (" .. code .. ")", "check")
+	return true
 end
 
 pressPanelDigits = function(panelModel, code, force)
+	-- Primary: exact reference port.
+	if enterCodeReference(code, force) then
+		local pad = mapRoot() ~= workspace and mapRoot():FindFirstChild("Keypad") or nil
+		if pad then
+			firePromptsIn(pad)
+		end
+		return
+	end
+	-- Fallback: the old generic logic (recursive digit search, VIM clicks).
 	local pad = keypadModel() or panelModel
 	if not pad then return end
-	-- Structural keypad (Digit1-4 + Readout): press + verify each digit.
-	local structural = pad:FindFirstChild("Digit1") ~= nil
-	if structural then
-		local allOk = true
-		for w = 1, #code do
-			if not State.autowin and not force then return end
-			local want = string.sub(code, w, w)
-			if not pressKeypadDigit(pad, w, want, force) then
-				allOk = false
-				break
-			end
-		end
-		if allOk then
-			firePromptsIn(pad)
-			return
-		end
-	end
-	-- Generic fallback: single-shot ClickDetectors, digit-part screen
-	-- clicks on the real Keypad, or VIM clicks on digit buttons.
 	local clicks, buttons = panelDigitControls(pad)
 	for i = 1, #code do
 		if not State.autowin and not force then return end
@@ -2095,7 +2086,7 @@ pressPanelDigits = function(panelModel, code, force)
 		if det and typeof(fireclickdetector) == "function" then
 			pcall(fireclickdetector, det)
 		elseif VIM then
-			local dw = pad:FindFirstChild("Digit" .. i) or nil
+			local dw = pad:FindFirstChild("Digit" .. i, true) or nil
 			local dp = dw and (dw:IsA("BasePart") and dw or dw:FindFirstChildWhichIsA("BasePart", true)) or nil
 			if dp then
 				screenClickPart(dp)
