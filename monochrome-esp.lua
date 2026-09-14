@@ -2107,8 +2107,8 @@ end
 -- Structural key grab: HiddenKey{i} > KeyPrompt. Teleports onto the
 -- prompt part, fires, verifies via inventory count or removal, then goes
 -- back to the given home position (or stays where it started).
--- Find the drawer/furniture ancestor of a HiddenKey (keys spawn inside
--- drawers; the KeyPrompt stays dead until the drawer is open).
+-- Find the drawer/furniture ancestor of an object by hierarchy (used by
+-- the generic fallback grab).
 local function drawerAncestorOf(inst)
 	local node = typeof(inst) == "Instance" and inst.Parent or nil
 	while node and node ~= workspace do
@@ -2118,6 +2118,55 @@ local function drawerAncestorOf(inst)
 		node = node.Parent
 	end
 	return nil
+end
+
+-- Find the SPECIFIC drawer/furniture physically holding a key. HiddenKey
+-- folders are DIRECT children of the map folder (not nested in furniture),
+-- so hierarchy never reveals the drawer — we locate it spatially: the
+-- furniture model whose bounding box contains the key part, else the
+-- nearest drawer-named model within 10 studs.
+local function drawerOfKey(keyPart)
+	if typeof(keyPart) ~= "Instance" or not keyPart:IsA("BasePart") then return nil end
+	local kpos = keyPart.Position
+	local scope = mapRoot()
+	-- Pass 1: spatial containment (key inside the model's bounding box).
+	local best, bestDist = nil, math.huge
+	local okAll, all = pcall(function() return scope:GetDescendants() end)
+	if okAll then
+		for i = 1, #all do
+			local m = all[i]
+			if m:IsA("Model") and not isOurEsp(m) then
+				local name = lowerName(m)
+				if matchesAny(name, DRAWER_NAMES) then
+					local ok, cf, sz = pcall(function() return m:GetBoundingBox() end)
+					if ok and cf then
+						local off = kpos - cf.Position
+						local half = sz / 2 + Vector3.new(1, 1, 1)
+						if math.abs(off.X) <= half.X and math.abs(off.Y) <= half.Y and math.abs(off.Z) <= half.Z then
+							local d = off.Magnitude
+							if d < bestDist then best, bestDist = m, d end
+						end
+					end
+				end
+			end
+		end
+	end
+	if best then return best end
+	-- Pass 2: nearest drawer-named model within 10 studs.
+	best, bestDist = nil, 10
+	if okAll then
+		for i = 1, #all do
+			local m = all[i]
+			if m:IsA("Model") and not isOurEsp(m) and matchesAny(lowerName(m), DRAWER_NAMES) then
+				local p = m:FindFirstChildWhichIsA("BasePart", true)
+				if p then
+					local d = (p.Position - kpos).Magnitude
+					if d < bestDist then best, bestDist = m, d end
+				end
+			end
+		end
+	end
+	return best
 end
 
 local function promptUsable(prompt)
@@ -2143,6 +2192,50 @@ local function openDrawer(drawer)
 	end
 end
 
+-- ===================== ANTI-KILL (under-floor dive) =====================
+-- During key collection the monster can't be allowed to interrupt: dive
+-- under the floor where it can't reach — prepPrompt'ed prompts still fire
+-- from there (LOS off, range 5000), so the grab continues from safety.
+local UNDER_FLOOR_OFFSET = 25
+local CurrentGrabPos = nil -- active grab anchor; heartbeat dives here
+local lastDiveNotify = 0
+
+local function monsterPosition()
+	local ver = workspace:FindFirstChild("VER")
+	if ver then
+		local _, p = resolveTarget(ver)
+		if p then return p.Position end
+	end
+	for inst, e in pairs(Tracked) do
+		if e.kind == "monster" and e.part and inWorkspace(inst) then
+			return e.part.Position
+		end
+	end
+	return nil
+end
+
+local function monsterNear(pos, radius)
+	if typeof(pos) ~= "Vector3" then return false end
+	local m = monsterPosition()
+	if not m then return false end
+	return (m - pos).Magnitude <= (radius or State.antiKillRadius or 15)
+end
+
+local function diveUnder(pos, quiet)
+	local hrp = myHRP()
+	if not hrp or typeof(pos) ~= "Vector3" then return false end
+	pcall(function() hrp.CFrame = CFrame.new(pos - Vector3.new(0, UNDER_FLOOR_OFFSET, 0)) end)
+	if not quiet and os.clock() - lastDiveNotify > 4 then
+		lastDiveNotify = os.clock()
+		notify("Anti Kill", "Monster close — diving under floor", "shield")
+	end
+	return true
+end
+
+-- Reference-script grab, hardened: TP 3 studs ABOVE the key part, fire the
+-- KeyPrompt directly (no blind E — that toggles drawers), verify by
+-- inventory/removal, retry with the SPECIFIC drawer opened only when the
+-- prompt is dead. Monster nearby -> do the whole thing from under the floor.
 local function grabHiddenKey(hk, homeOverride)
 	if typeof(hk) ~= "Instance" then return false end
 	local before = countKeysHeld()
@@ -2150,69 +2243,94 @@ local function grabHiddenKey(hk, homeOverride)
 	if not prompt then return false end
 	local hrp = myHRP()
 	local home = homeOverride or ((hrp and hrp.CFrame) or nil)
-	local drawer = drawerAncestorOf(hk)
+	local drawer = nil -- located lazily (spatial search is not cheap)
+
+	local function cleanup(goHome)
+		CurrentGrabPos = nil
+		hrp = myHRP()
+		if goHome and hrp and home then
+			pcall(function() hrp.CFrame = home end)
+		end
+	end
 
 	for _ = 1, 4 do
-		if not State.autowin or not State.running then return false end
-		if not inWorkspace(hk) then
-			hrp = myHRP()
-			if hrp and home then pcall(function() hrp.CFrame = home end) end
-			return true
-		end
+		if not State.autowin or not State.running then cleanup(false) return false end
+		if not inWorkspace(hk) then cleanup(true) return true end
 		waitRespawn()
-		if not State.autowin then return false end
+		if not State.autowin then cleanup(false) return false end
 		-- Refresh the key part: it moves when the drawer slides open.
 		local part = keyPartIn(hk)
+		CurrentGrabPos = part and part.Position or nil
 
-		-- Drawer closed? open it FIRST — firing the KeyPrompt does nothing
-		-- while it's dead, and a blind E press toggles the drawer instead
-		-- (that was the open-close loop bug).
-		if drawer and not promptUsable(prompt) then
-			openDrawer(drawer)
-			task.wait(0.45)
-			if not State.autowin then return false end
-			prompt = keyPromptIn(hk) or prompt
-			part = keyPartIn(hk) or part
-		end
-
+		-- Reference-style direct grab FIRST: prompt may already be alive.
 		if not promptUsable(prompt) then
-			-- Still dead (no drawer found or it didn't open): fire every
-			-- prompt around the key once, then re-check.
-			firePromptsIn(hk)
-			if drawer then firePromptsIn(drawer) end
-			task.wait(0.3)
-			if not State.autowin then return false end
+			-- Prompt dead -> the key sits in a CLOSED drawer. Locate and
+			-- open the SPECIFIC drawer holding it, then wait for the
+			-- prompt to wake up.
+			if not drawer then drawer = drawerOfKey(part) end
+			if drawer then
+				openDrawer(drawer)
+				for _ = 1, 8 do
+					if promptUsable(prompt) then break end
+					task.wait(0.15)
+				end
+			end
 			prompt = keyPromptIn(hk) or prompt
 			part = keyPartIn(hk) or part
+			CurrentGrabPos = part and part.Position or CurrentGrabPos
 		end
 
 		prepPrompt(prompt)
 		pcall(function() prompt.HoldDuration = 0 end)
-		hrp = myHRP()
-		if hrp and part and inWorkspace(part) then
-			pcall(function() hrp.CFrame = part.CFrame + Vector3.new(0, 1, 0) end)
-			task.wait(0.12)
-		end
-		if not State.autowin then return false end
-		-- Direct prompt fire only. Real E is the LAST resort: standing on
-		-- the drawer, E hits the drawer prompt and closes it again.
-		if promptUsable(prompt) then
-			firePrompt(prompt, true)
-		elseif typeof(fireproximityprompt) == "function" then
-			pcall(fireproximityprompt, prompt)
+
+		-- Monster nearby? Dive under the floor and grab from safety.
+		local diving = CurrentGrabPos and monsterNear(CurrentGrabPos)
+		if diving then
+			diveUnder(CurrentGrabPos)
+			task.wait(0.15)
 		else
+			hrp = myHRP()
+			if hrp and part and inWorkspace(part) then
+				-- Reference offset: 3 studs above the key part.
+				pcall(function() hrp.CFrame = part.CFrame + Vector3.new(0, 3, 0) end)
+				task.wait(0.15)
+			end
+		end
+		if not State.autowin then cleanup(false) return false end
+
+		if promptUsable(prompt) and typeof(fireproximityprompt) == "function" then
+			-- Works from under the floor: LOS off + range 5000.
+			pcall(fireproximityprompt, prompt)
+			task.wait(0.15)
+			if inWorkspace(hk) and countKeysHeld() <= before then
+				pcall(fireproximityprompt, prompt) -- second shot
+			end
+		elseif promptUsable(prompt) and not diving then
+			firePrompt(prompt, true)
+		elseif diving then
+			-- No fireproximityprompt + monster near: wait it out below,
+			-- then surface and grab normally.
+			for _ = 1, 32 do
+				if not State.autowin then cleanup(false) return false end
+				if not monsterNear(CurrentGrabPos, 25) then break end
+				task.wait(0.25)
+			end
+			hrp = myHRP()
+			if hrp and part then
+				pcall(function() hrp.CFrame = part.CFrame + Vector3.new(0, 3, 0) end)
+			end
+			task.wait(0.15)
 			firePrompt(prompt, true)
 		end
-		task.wait(0.3)
+		task.wait(0.25)
 		if not inWorkspace(hk) or countKeysHeld() > before then
-			hrp = myHRP()
-			if hrp and home then pcall(function() hrp.CFrame = home end) end
+			cleanup(true)
 			return true
 		end
 	end
-	hrp = myHRP()
-	if hrp and home then pcall(function() hrp.CFrame = home end) end
-	return (not inWorkspace(hk)) or countKeysHeld() > before
+	local ok = (not inWorkspace(hk)) or countKeysHeld() > before
+	cleanup(ok)
+	return ok
 end
 
 local function grabKey(inst)
@@ -3283,39 +3401,39 @@ trackConnection(RunService.Heartbeat:Connect(function(dt)
 		pcall(function() hum.Health = hum.MaxHealth end)
 	end
 	-- Anti Kill: the monster crossed the trigger radius -> teleport away.
-	if State.antiKill then
+	-- While a key grab is active (CurrentGrabPos), dive UNDER THE FLOOR
+	-- instead of fleeing 100 studs — the grab continues from safety.
+	if State.antiKill or CurrentGrabPos then
 		accAntiKill = accAntiKill + dt
 		if accAntiKill >= 0.2 then
 			accAntiKill = 0
 			local hrp = myHRP()
-			local mPart = nil
-			local ver = workspace:FindFirstChild("VER")
-			if ver then
-				local _, p = resolveTarget(ver)
-				mPart = p
-			else
-				for inst, e in pairs(Tracked) do
-					if e.kind == "monster" and e.part and inWorkspace(inst) then
-						mPart = e.part
-						break
-					end
-				end
-			end
-			if hrp and mPart then
-				local away = (hrp.Position - mPart.Position).Magnitude
+			local mPos = monsterPosition()
+			if hrp and mPos then
+				local away = (hrp.Position - mPos).Magnitude
 				if away <= State.antiKillRadius then
-					local dir = (hrp.Position - mPart.Position)
-					if dir.Magnitude < 0.1 then
-						dir = Vector3.new(0, 0, 1)
+					if CurrentGrabPos then
+						-- Under-floor dive: monster can't reach, prompts
+						-- still fire (prepPrompt removed LOS + range limits).
+						pcall(function() hrp.CFrame = CFrame.new(CurrentGrabPos - Vector3.new(0, UNDER_FLOOR_OFFSET, 0)) end)
+						if os.clock() - lastDiveNotify > 4 then
+							lastDiveNotify = os.clock()
+							notify("Anti Kill", "Monster at " .. math.floor(away) .. " studs — diving under floor (grab continues)", "shield")
+						end
+					else
+						local dir = (hrp.Position - mPos)
+						if dir.Magnitude < 0.1 then
+							dir = Vector3.new(0, 0, 1)
+						end
+						dir = Vector3.new(dir.X, 0, dir.Z)
+						if dir.Magnitude < 0.1 then
+							dir = Vector3.new(1, 0, 0)
+						end
+						dir = dir.Unit
+						local dest = mPos + dir * State.antiKillFlee + Vector3.new(0, 3, 0)
+						pcall(function() hrp.CFrame = CFrame.new(dest) end)
+						notify("Anti Kill", "Monster at " .. math.floor(away) .. " studs — fled " .. State.antiKillFlee .. " studs", "run")
 					end
-					dir = Vector3.new(dir.X, 0, dir.Z)
-					if dir.Magnitude < 0.1 then
-						dir = Vector3.new(1, 0, 0)
-					end
-					dir = dir.Unit
-					local dest = mPart.Position + dir * State.antiKillFlee + Vector3.new(0, 3, 0)
-					pcall(function() hrp.CFrame = CFrame.new(dest) end)
-					notify("Anti Kill", "Monster at " .. math.floor(away) .. " studs — fled " .. State.antiKillFlee .. " studs", "run")
 				end
 			end
 		end
