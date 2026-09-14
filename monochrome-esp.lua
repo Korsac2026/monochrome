@@ -13,7 +13,7 @@
 --               where the code IS — handwritten digits live in the paper
 --               texture, plus world texts/values showing digits).
 --               Never marks the keypad where you type the code.
---               Style: chams, 2D corner boxes, snaplines, labels, colors.
+--               Style: chams, labels, colors.
 --    Movement : Noclip, Fly, Walk Speed, Fly Speed, Fullbright,
 --               TP Spawn, Instant Interact.
 --    Auto     : Auto Win (instant teleport run), Auto Use Keys,
@@ -65,16 +65,6 @@ local LocalPlayer = Players.LocalPlayer
 local Camera = workspace.CurrentCamera
 local VIM = nil
 pcall(function() VIM = game:GetService("VirtualInputManager") end)
-local HasDrawing = false
-pcall(function()
-	if Drawing and typeof(Drawing.new) == "function" then
-		local test = Drawing.new("Line")
-		if test then
-			HasDrawing = true
-			test:Remove()
-		end
-	end
-end)
 
 local TARGET_PLACE = 134208374070897
 local KEYS_NEEDED = 4
@@ -190,8 +180,6 @@ local State = {
 	npcScan = false, -- mark ANY non-player humanoid as monster
 	godmode = false, -- infinite lives attempt (client-side locks)
 	chams = true, -- highlight outlines
-	boxes = true, -- 2D corner boxes (needs Drawing)
-	tracers = true, -- snaplines (needs Drawing)
 	labels = true, -- name/distance billboards
 	noclip = false,
 	fly = false,
@@ -474,7 +462,6 @@ local function boxSizeOf(target, part)
 end
 
 local EspFolder = nil
-local DrawScreenGui = nil
 
 local function getSafeUiParent()
 	local ok, parent = pcall(function()
@@ -490,13 +477,6 @@ local function initEspHolders()
 		EspFolder = Instance.new("Folder")
 		EspFolder.Name = "UraniumESP"
 		EspFolder.Parent = getSafeUiParent()
-	end
-	if not DrawScreenGui or not DrawScreenGui.Parent then
-		DrawScreenGui = Instance.new("ScreenGui")
-		DrawScreenGui.Name = "UraniumDraw"
-		DrawScreenGui.ResetOnSpawn = false
-		DrawScreenGui.DisplayOrder = 999
-		DrawScreenGui.Parent = getSafeUiParent()
 	end
 end
 initEspHolders()
@@ -573,196 +553,6 @@ local function makeEspObjects(target, part)
 	return hl, bb, txt, stroke, dot
 end
 
--- ---------- 2D Corner Boxes + Snaplines (Universal Drawing & Gui) ----------
-local function ensureDraw(e)
-	if e.draw then return end
-	if HasDrawing then
-		local d = { isGui = false, c = {}, snap = nil, txt = nil }
-		for i = 1, 8 do
-			local l = Drawing.new("Line")
-			l.Visible = false
-			l.Thickness = 1.8
-			d.c[i] = l
-		end
-		local s = Drawing.new("Line")
-		s.Visible = false
-		s.Thickness = 1.2
-		d.snap = s
-		e.draw = d
-	else
-		initEspHolders()
-		if not DrawScreenGui then return end
-		local d = { isGui = true, c = {}, snap = nil }
-		for i = 1, 8 do
-			local f = Instance.new("Frame")
-			f.BorderSizePixel = 0
-			f.Visible = false
-			f.ZIndex = 5
-			f.Parent = DrawScreenGui
-			d.c[i] = f
-		end
-		local s = Instance.new("Frame")
-		s.BorderSizePixel = 0
-		s.Visible = false
-		s.ZIndex = 4
-		s.AnchorPoint = Vector2.new(0, 0.5)
-		s.Parent = DrawScreenGui
-		d.snap = s
-		e.draw = d
-	end
-end
-
-local function hideDraw(e)
-	local d = e.draw
-	if not d then return end
-	for i = 1, #d.c do d.c[i].Visible = false end
-	if d.snap then d.snap.Visible = false end
-	if d.txt then d.txt.Visible = false end
-end
-
-local function destroyDraw(e)
-	local d = e.draw
-	if not d then return end
-	if d.isGui then
-		for i = 1, #d.c do pcall(function() d.c[i]:Destroy() end) end
-		if d.snap then pcall(function() d.snap:Destroy() end) end
-	else
-		for i = 1, #d.c do pcall(function() d.c[i]:Remove() end) end
-		if d.snap then pcall(function() d.snap:Remove() end) end
-		if d.txt then pcall(function() d.txt:Remove() end) end
-	end
-	e.draw = nil
-end
-
--- Accurate 2D bounds: project all 8 corners of the 3D box.
-local function projectBox2D(center, sz)
-	local half = sz / 2
-	local corners = {
-		center + Vector3.new(-half.X, -half.Y, -half.Z),
-		center + Vector3.new( half.X, -half.Y, -half.Z),
-		center + Vector3.new(-half.X,  half.Y, -half.Z),
-		center + Vector3.new( half.X,  half.Y, -half.Z),
-		center + Vector3.new(-half.X, -half.Y,  half.Z),
-		center + Vector3.new( half.X, -half.Y,  half.Z),
-		center + Vector3.new(-half.X,  half.Y,  half.Z),
-		center + Vector3.new( half.X,  half.Y,  half.Z),
-	}
-	local minX, minY = math.huge, math.huge
-	local maxX, maxY = -math.huge, -math.huge
-	local any = false
-	for i = 1, 8 do
-		local sp, on = Camera:WorldToViewportPoint(corners[i])
-		if on and sp.Z > 0 then
-			any = true
-			if sp.X < minX then minX = sp.X end
-			if sp.X > maxX then maxX = sp.X end
-			if sp.Y < minY then minY = sp.Y end
-			if sp.Y > maxY then maxY = sp.Y end
-		end
-	end
-	if not any then return nil end
-	local pad = 2
-	minX = math.max(0, minX - pad)
-	minY = math.max(0, minY - pad)
-	maxX = math.min(Camera.ViewportSize.X, maxX + pad)
-	maxY = math.min(Camera.ViewportSize.Y, maxY + pad)
-	local w = math.max(maxX - minX, 8)
-	local h = math.max(maxY - minY, 8)
-	return minX, minY, w, h
-end
-
-local function drawEntry(e, origin)
-	local d = e.draw
-	if not d then return end
-	if not e.part or not inWorkspace(e.root) then
-		hideDraw(e)
-		return
-	end
-	local showBox = State.boxes
-	local showTrac = State.tracers
-	if (not showBox and not showTrac) or not isKindEnabled(e.kind) then
-		hideDraw(e)
-		return
-	end
-	local pPos = e.part.Position
-	local dist = (pPos - origin).Magnitude
-	if dist > State.maxDist or not Camera then
-		hideDraw(e)
-		return
-	end
-	local cPos, onScreen = Camera:WorldToViewportPoint(pPos)
-	if not onScreen or cPos.Z <= 0 then
-		hideDraw(e)
-		return
-	end
-	local col = kindColor(e.kind)
-	-- 2D bounds from the real 3D box (falls back to a height estimate)
-	local sz = e.boxSize or e.part.Size
-	local lx, ty, w, h = projectBox2D(pPos, sz)
-	if not lx then
-		local top, onT = Camera:WorldToViewportPoint(pPos + Vector3.new(0, sz.Y / 2, 0))
-		local bot, onB = Camera:WorldToViewportPoint(pPos - Vector3.new(0, sz.Y / 2, 0))
-		if not onT and not onB then
-			hideDraw(e)
-			return
-		end
-		h = math.max(math.abs((top.Y or cPos.Y) - (bot.Y or cPos.Y)), 8)
-		w = math.max(h * 0.58, 8)
-		lx = cPos.X - w / 2
-		ty = math.min(top.Y, bot.Y)
-	end
-	local rx = lx + w
-	local by = ty + h
-	local cx = lx + w / 2
-	local cl = math.max(math.min(w, h) * 0.25, 3)
-	local pts = {
-		{ lx, ty, lx + cl, ty }, { lx, ty, lx, ty + cl },
-		{ rx - cl, ty, rx, ty }, { rx, ty, rx, ty + cl },
-		{ lx, by - cl, lx, by }, { lx, by, lx + cl, by },
-		{ rx - cl, by, rx, by }, { rx, by, rx, by - cl },
-	}
-	if d.isGui then
-		for i = 1, 8 do
-			local f = d.c[i]
-			local p = pts[i]
-			local x1, y1, x2, y2 = p[1], p[2], p[3], p[4]
-			f.BackgroundColor3 = col
-			f.Position = UDim2.new(0, math.min(x1, x2), 0, math.min(y1, y2))
-			f.Size = UDim2.new(0, math.max(math.abs(x2 - x1), 1.8), 0, math.max(math.abs(y2 - y1), 1.8))
-			f.Visible = showBox
-		end
-		if showTrac then
-			local vs = Camera.ViewportSize
-			local from = Vector2.new(vs.X / 2, vs.Y)
-			local to = Vector2.new(cx, by)
-			local diff = to - from
-			d.snap.BackgroundColor3 = col
-			d.snap.Position = UDim2.new(0, from.X, 0, from.Y)
-			d.snap.Size = UDim2.new(0, diff.Magnitude, 0, 1.2)
-			d.snap.Rotation = math.deg(math.atan2(diff.Y, diff.X))
-			d.snap.Visible = true
-		else
-			d.snap.Visible = false
-		end
-	else
-		for i = 1, 8 do
-			local l = d.c[i]
-			l.Color = col
-			l.From = Vector2.new(pts[i][1], pts[i][2])
-			l.To = Vector2.new(pts[i][3], pts[i][4])
-			l.Visible = showBox
-		end
-		if showTrac then
-			local vs = Camera.ViewportSize
-			d.snap.Color = col
-			d.snap.From = Vector2.new(vs.X / 2, vs.Y)
-			d.snap.To = Vector2.new(cx, by)
-			d.snap.Visible = true
-		else
-			d.snap.Visible = false
-		end
-	end
-end
 
 -- Given a TextLabel/TextButton, find the world part it is displayed on.
 -- Returns nil for player UI (ScreenGui) so we never mark menus,
@@ -1019,7 +809,6 @@ end
 local function removeEntry(inst)
 	local e = Tracked[inst]
 	if e then
-		destroyDraw(e)
 		if e.hl then pcall(function() e.hl:Destroy() end) end
 		if e.bb then pcall(function() e.bb:Destroy() end) end
 		Tracked[inst] = nil
@@ -1259,10 +1048,6 @@ local function updateEntry(e, origin, maxDist, refreshDigits)
 		else
 			return true -- still pending
 		end
-	end
-	-- Universal 2D boxes & snaplines
-	if State.boxes or State.tracers then
-		ensureDraw(e)
 	end
 	if e.kind == "code" and refreshDigits then
 		if not refreshCodeDigits(e) then
@@ -2914,18 +2699,6 @@ local function buildGui()
 		Callback = function(v) State.chams = v end,
 	})
 	vSec:Toggle({
-		Name = "2D boxes", Default = State.boxes, Flag = "ura_boxes",
-		Callback = function(v)
-			State.boxes = v
-		end,
-	})
-	vSec:Toggle({
-		Name = "Snaplines", Default = State.tracers, Flag = "ura_tracers",
-		Callback = function(v)
-			State.tracers = v
-		end,
-	})
-	vSec:Toggle({
 		Name = "Labels (name + dist)", Default = State.labels, Flag = "ura_labels",
 		Callback = function(v) State.labels = v end,
 	})
@@ -3541,24 +3314,6 @@ trackConnection(RunService.Heartbeat:Connect(function(dt)
 			pcall(function()
 				StatusLabel:Set("monster:" .. m .. "  key:" .. k .. "  code:" .. c .. "  hide:" .. h .. "  note:" .. noteFlag .. codeTxt .. "  keys:" .. countKeysHeld() .. "/4" .. note)
 			end)
-		end
-	end
-end))
-
--- 2D boxes / snaplines render loop (Drawing or ScreenGui fallback)
-trackConnection(RunService.RenderStepped:Connect(function()
-	if not State.running then return end
-	if not Camera then return end
-	local origin = rootPosition()
-	local needDraw = State.boxes or State.tracers
-	for _, e in pairs(Tracked) do
-		if e.part and e.boxSize then
-			if needDraw and not e.draw then
-				ensureDraw(e)
-			end
-			pcall(drawEntry, e, origin)
-		elseif e.draw then
-			hideDraw(e)
 		end
 	end
 end))
