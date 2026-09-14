@@ -2116,32 +2116,103 @@ end
 -- Structural key grab: HiddenKey{i} > KeyPrompt. Teleports onto the
 -- prompt part, fires, verifies via inventory count or removal, then goes
 -- back to the given home position (or stays where it started).
+-- Find the drawer/furniture ancestor of a HiddenKey (keys spawn inside
+-- drawers; the KeyPrompt stays dead until the drawer is open).
+local function drawerAncestorOf(inst)
+	local node = typeof(inst) == "Instance" and inst.Parent or nil
+	while node and node ~= workspace do
+		if matchesAny(lowerName(node), DRAWER_NAMES) then
+			return node
+		end
+		node = node.Parent
+	end
+	return nil
+end
+
+local function promptUsable(prompt)
+	if typeof(prompt) ~= "Instance" or not prompt:IsA("ProximityPrompt") then return false end
+	local ok, en = pcall(function() return prompt.Enabled end)
+	return ok and en == true
+end
+
+-- Open the drawer holding a key: fire its prompt and click detectors.
+local function openDrawer(drawer)
+	if typeof(drawer) ~= "Instance" then return end
+	local ok, descs = pcall(function() return drawer:GetDescendants() end)
+	if not ok then return end
+	for i = 1, #descs do
+		local d = descs[i]
+		if d:IsA("ProximityPrompt") and d.Enabled then
+			prepPrompt(d)
+			pcall(function() d.HoldDuration = 0 end)
+			firePrompt(d, true)
+		elseif d:IsA("ClickDetector") and typeof(fireclickdetector) == "function" then
+			pcall(fireclickdetector, d)
+		end
+	end
+end
+
 local function grabHiddenKey(hk, homeOverride)
 	if typeof(hk) ~= "Instance" then return false end
 	local before = countKeysHeld()
 	local prompt = keyPromptIn(hk)
-	local part = keyPartIn(hk)
-	if not prompt or not part then return false end
-	prepPrompt(prompt)
-	pcall(function() prompt.HoldDuration = 0 end)
+	if not prompt then return false end
 	local hrp = myHRP()
 	local home = homeOverride or ((hrp and hrp.CFrame) or nil)
-	for _ = 1, 3 do
+	local drawer = drawerAncestorOf(hk)
+
+	for _ = 1, 4 do
 		if not State.autowin or not State.running then return false end
-		if not inWorkspace(hk) then return true end
+		if not inWorkspace(hk) then
+			hrp = myHRP()
+			if hrp and home then pcall(function() hrp.CFrame = home end) end
+			return true
+		end
 		waitRespawn()
 		if not State.autowin then return false end
+		-- Refresh the key part: it moves when the drawer slides open.
+		local part = keyPartIn(hk)
+
+		-- Drawer closed? open it FIRST — firing the KeyPrompt does nothing
+		-- while it's dead, and a blind E press toggles the drawer instead
+		-- (that was the open-close loop bug).
+		if drawer and not promptUsable(prompt) then
+			openDrawer(drawer)
+			task.wait(0.45)
+			if not State.autowin then return false end
+			prompt = keyPromptIn(hk) or prompt
+			part = keyPartIn(hk) or part
+		end
+
+		if not promptUsable(prompt) then
+			-- Still dead (no drawer found or it didn't open): fire every
+			-- prompt around the key once, then re-check.
+			firePromptsIn(hk)
+			if drawer then firePromptsIn(drawer) end
+			task.wait(0.3)
+			if not State.autowin then return false end
+			prompt = keyPromptIn(hk) or prompt
+			part = keyPartIn(hk) or part
+		end
+
+		prepPrompt(prompt)
+		pcall(function() prompt.HoldDuration = 0 end)
 		hrp = myHRP()
-		if hrp and inWorkspace(part) then
+		if hrp and part and inWorkspace(part) then
 			pcall(function() hrp.CFrame = part.CFrame + Vector3.new(0, 1, 0) end)
 			task.wait(0.12)
 		end
 		if not State.autowin then return false end
-		prepPrompt(prompt)
-		pcall(function() prompt.HoldDuration = 0 end)
-		firePrompt(prompt, true)
-		pressE(0.15)
-		task.wait(0.2)
+		-- Direct prompt fire only. Real E is the LAST resort: standing on
+		-- the drawer, E hits the drawer prompt and closes it again.
+		if promptUsable(prompt) then
+			firePrompt(prompt, true)
+		elseif typeof(fireproximityprompt) == "function" then
+			pcall(fireproximityprompt, prompt)
+		else
+			firePrompt(prompt, true)
+		end
+		task.wait(0.3)
 		if not inWorkspace(hk) or countKeysHeld() > before then
 			hrp = myHRP()
 			if hrp and home then pcall(function() hrp.CFrame = home end) end
@@ -2155,6 +2226,7 @@ end
 
 local function grabKey(inst)
 	local before = countKeysHeld()
+	local drawer = drawerAncestorOf(inst)
 	for attempt = 1, 3 do
 		if not State.autowin or not State.running then return false end
 		if not inWorkspace(inst) then return true end
@@ -2166,7 +2238,17 @@ local function grabKey(inst)
 			instantTP(pos + Vector3.new(0, 1, 0))
 		end
 		if not State.autowin then return false end
+		-- Open the drawer first if there is one; the key prompt is dead
+		-- while closed and a blind E just toggles the drawer.
+		if drawer then
+			openDrawer(drawer)
+			task.wait(0.35)
+			if not State.autowin then return false end
+		end
 		firePromptsIn(inst)
+		task.wait(0.2)
+		if not inWorkspace(inst) or countKeysHeld() > before then return true end
+		-- Real E as last resort only (it can hit the drawer prompt).
 		pressE(0.2)
 		task.wait(0.2)
 		if not inWorkspace(inst) or countKeysHeld() > before then return true end
