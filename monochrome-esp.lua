@@ -2770,7 +2770,7 @@ local function buildGui()
 	})
 	local godSec = movMain:Section({ Name = "Survival", Side = 2 })
 	godSec:Toggle({
-		Name = "Infinite Lives", Default = State.godmode, Flag = "ura_godmode",
+		Name = "Infinite Lives [PATCHED]", Default = State.godmode, Flag = "ura_godmode",
 		Callback = function(v)
 			applyGodmode(v)
 		end,
