@@ -2222,51 +2222,81 @@ end
 
 -- Find the SPECIFIC drawer/furniture physically holding a key. HiddenKey
 -- folders are DIRECT children of the map folder (not nested in furniture),
--- so hierarchy never reveals the drawer — we locate it spatially: the
--- furniture model whose bounding box contains the key part, else the
--- nearest drawer-named model within 10 studs.
+-- so hierarchy never reveals the drawer — we locate it spatially.
+-- Pass 1: drawer-named Model whose bounding box contains the key.
+-- Pass 2: nearest drawer/open prompt near the key. In this game drawers
+-- are LOOSE parts (Cube.156/157…) with attachment-hosted DrawerPrompts,
+-- so name matching on the furniture NEVER hits — the prompt is the anchor.
 local function drawerOfKey(keyPart)
 	if typeof(keyPart) ~= "Instance" or not keyPart:IsA("BasePart") then return nil end
 	local kpos = keyPart.Position
 	local scope = mapRoot()
-	-- Pass 1: spatial containment (key inside the model's bounding box).
-	local best, bestDist = nil, math.huge
 	local okAll, all = pcall(function() return scope:GetDescendants() end)
-	if okAll then
-		for i = 1, #all do
-			local m = all[i]
-			if m:IsA("Model") and not isOurEsp(m) then
-				local name = lowerName(m)
-				if matchesAny(name, DRAWER_NAMES) then
-					local ok, cf, sz = pcall(function() return m:GetBoundingBox() end)
-					if ok and cf then
-						local off = kpos - cf.Position
-						local half = sz / 2 + Vector3.new(1, 1, 1)
-						if math.abs(off.X) <= half.X and math.abs(off.Y) <= half.Y and math.abs(off.Z) <= half.Z then
-							local d = off.Magnitude
-							if d < bestDist then best, bestDist = m, d end
+	if not okAll then return nil end
+	-- Pass 1: spatial containment in a drawer-named Model.
+	local best, bestDist = nil, math.huge
+	for i = 1, #all do
+		local m = all[i]
+		if m:IsA("Model") and not isOurEsp(m) and matchesAny(lowerName(m), DRAWER_NAMES) then
+			local ok, cf, sz = pcall(function() return m:GetBoundingBox() end)
+			if ok and cf then
+				local off = kpos - cf.Position
+				local half = sz / 2 + Vector3.new(1, 1, 1)
+				if math.abs(off.X) <= half.X and math.abs(off.Y) <= half.Y and math.abs(off.Z) <= half.Z then
+					if off.Magnitude < bestDist then best, bestDist = m, off.Magnitude end
+				end
+			end
+		end
+	end
+	if best then return best end
+	-- Pass 2: nearest drawer prompt near the key (any host type).
+	local bestContainer, bestContainerDist = nil, 8
+	for i = 1, #all do
+		local d = all[i]
+		if d:IsA("ProximityPrompt") and d.Enabled and not isOurEsp(d) then
+			local dn = lowerName(d)
+			if string.find(dn, "drawer", 1, true) then
+				local host = d.Parent
+				if host and host:IsA("Attachment") then host = host.Parent end
+				if host then
+					local anchor = promptRootPart(d)
+					if anchor then
+						local dist = (anchor.Position - kpos).Magnitude
+						if dist < bestContainerDist then
+							bestContainer, bestContainerDist = host, dist
 						end
 					end
 				end
 			end
 		end
 	end
-	if best then return best end
-	-- Pass 2: nearest drawer-named model within 10 studs.
-	best, bestDist = nil, 10
-	if okAll then
-		for i = 1, #all do
-			local m = all[i]
-			if m:IsA("Model") and not isOurEsp(m) and matchesAny(lowerName(m), DRAWER_NAMES) then
-				local p = m:FindFirstChildWhichIsA("BasePart", true)
-				if p then
-					local d = (p.Position - kpos).Magnitude
-					if d < bestDist then best, bestDist = m, d end
+	if bestContainer then return bestContainer end
+	-- Pass 3: any "open" prompt very close to the key (doors excluded by range).
+	bestContainer, bestContainerDist = nil, 5
+	for i = 1, #all do
+		local d = all[i]
+		if d:IsA("ProximityPrompt") and d.Enabled and not isOurEsp(d) then
+			local hay = lowerName(d) .. " " .. tostring(d.ActionText or ""):lower()
+			if string.find(hay, "open", 1, true)
+				and not matchesAny(hay, CLOSET_NAMES)
+				and not string.find(hay, "elevator", 1, true)
+				and not string.find(hay, "exit", 1, true)
+				and not string.find(hay, "door", 1, true) then
+				local host = d.Parent
+				if host and host:IsA("Attachment") then host = host.Parent end
+				if host then
+					local anchor = promptRootPart(d)
+					if anchor then
+						local dist = (anchor.Position - kpos).Magnitude
+						if dist < bestContainerDist then
+							bestContainer, bestContainerDist = host, dist
+						end
+					end
 				end
 			end
 		end
 	end
-	return best
+	return bestContainer
 end
 
 local function promptUsable(prompt)
@@ -2466,7 +2496,8 @@ end
 
 local function grabKey(inst)
 	local before = countKeysHeld()
-	local drawer = drawerAncestorOf(inst)
+	local _, ipart = resolveTarget(inst)
+	local drawer = drawerAncestorOf(inst) or drawerOfKey(ipart)
 	for attempt = 1, 3 do
 		if not State.autowin or not State.running then return false end
 		if not inWorkspace(inst) then return true end
